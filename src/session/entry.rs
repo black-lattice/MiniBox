@@ -1,8 +1,13 @@
+use std::net::SocketAddr;
+
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::protocol::socks5::{ReplyCode, Socks5Handler};
+use crate::relay::relay_bidirectional;
 use crate::session::http_connect;
-use crate::session::{SessionContext, SessionError, SessionProtocol, SessionRequest};
+use crate::session::{SessionContext, SessionError, SessionPlan, SessionProtocol, SessionRequest};
+use crate::upstream::resolve_connect_target;
+use crate::upstream::{DialError, dial_tcp};
 
 pub async fn accept_downstream<S>(
     stream: &mut S,
@@ -33,16 +38,18 @@ where
     }
 }
 
-pub async fn drive_placeholder_connection<S>(
+pub async fn drive_session<S>(
     stream: &mut S,
     context: SessionContext,
+    plan: SessionPlan,
 ) -> Result<SessionRequest, SessionError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let request = accept_downstream(stream, &context).await?;
-    reject_deferred_connect(stream, &request).await?;
-    Ok(request)
+    match context.protocol {
+        SessionProtocol::Socks5 => drive_socks5_session(stream, context, plan).await,
+        SessionProtocol::HttpConnect => Err(http_connect::placeholder_error(&context)),
+    }
 }
 
 async fn accept_socks5<S>(
@@ -60,19 +67,79 @@ where
     })
 }
 
+async fn drive_socks5_session<S>(
+    stream: &mut S,
+    context: SessionContext,
+    plan: SessionPlan,
+) -> Result<SessionRequest, SessionError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let request = accept_socks5(stream, &context).await?;
+    let dial_target = match resolve_connect_target(&request) {
+        Ok(target) => target,
+        Err(error) => {
+            Socks5Handler
+                .send_reply(stream, ReplyCode::GeneralFailure)
+                .await?;
+            return Err(error.into());
+        }
+    };
+
+    let (mut upstream, bind_addr) = match dial_tcp(&dial_target, plan.direct_dial).await {
+        Ok(result) => result,
+        Err(error) => {
+            send_dial_failure_reply(stream, &error).await?;
+            return Err(error.into());
+        }
+    };
+
+    Socks5Handler
+        .send_success_reply(stream, socket_addr_to_endpoint(bind_addr))
+        .await?;
+
+    relay_bidirectional(stream, &mut upstream, plan.relay).await?;
+
+    Ok(request)
+}
+
+async fn send_dial_failure_reply<S>(stream: &mut S, error: &DialError) -> Result<(), SessionError>
+where
+    S: AsyncWrite + Unpin,
+{
+    Socks5Handler
+        .send_reply(stream, error.reply_code())
+        .await
+        .map_err(SessionError::from)
+}
+
+fn socket_addr_to_endpoint(address: SocketAddr) -> crate::protocol::socks5::TargetEndpoint {
+    use crate::protocol::socks5::{TargetAddr, TargetEndpoint};
+
+    let target_addr = match address.ip() {
+        std::net::IpAddr::V4(ip) => TargetAddr::Ipv4(ip),
+        std::net::IpAddr::V6(ip) => TargetAddr::Ipv6(ip),
+    };
+
+    TargetEndpoint {
+        address: target_addr,
+        port: address.port(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use super::drive_placeholder_connection;
+    use super::accept_downstream;
     use crate::config::internal::TargetRef;
     use crate::protocol::socks5::TargetAddr;
     use crate::session::{SessionContext, SessionProtocol};
 
     #[tokio::test]
-    async fn placeholder_drive_extracts_target_and_emits_general_failure() {
+    async fn accept_downstream_extracts_socks5_target() {
         let (mut client, mut server) = tokio::io::duplex(128);
         let context = SessionContext {
             listener_name: "local-socks".to_string(),
@@ -83,7 +150,7 @@ mod tests {
         };
 
         let server_task =
-            tokio::spawn(async move { drive_placeholder_connection(&mut server, context).await });
+            tokio::spawn(async move { accept_downstream(&mut server, &context).await });
 
         client
             .write_all(&[0x05, 0x01, 0x00])
@@ -104,13 +171,6 @@ mod tests {
             ])
             .await
             .expect("write connect request");
-
-        let mut response = [0u8; 10];
-        client
-            .read_exact(&mut response)
-            .await
-            .expect("read deferred failure response");
-        assert_eq!(response, [0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
 
         let request = server_task
             .await

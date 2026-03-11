@@ -34,11 +34,38 @@ impl Socks5Handler {
     where
         S: AsyncWrite + Unpin,
     {
-        let response = Response {
-            reply,
-            bind: failure_bind_addr(),
-        };
+        self.send_response(
+            stream,
+            Response {
+                reply,
+                bind: failure_bind_addr(),
+            },
+        )
+        .await
+    }
 
+    pub async fn send_success_reply<S>(
+        &self,
+        stream: &mut S,
+        bind: TargetEndpoint,
+    ) -> std::io::Result<()>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        self.send_response(
+            stream,
+            Response {
+                reply: ReplyCode::Succeeded,
+                bind,
+            },
+        )
+        .await
+    }
+
+    async fn send_response<S>(&self, stream: &mut S, response: Response) -> std::io::Result<()>
+    where
+        S: AsyncWrite + Unpin,
+    {
         stream.write_all(&encode_response(&response)).await?;
         stream.flush().await
     }

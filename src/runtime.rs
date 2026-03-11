@@ -4,23 +4,27 @@ use crate::listener::{
     AdmissionControl, AdmissionSnapshot, ListenerRegistry, ListenerTaskHandle,
     spawn_registry_accept_loops,
 };
+use crate::session::SessionPlan;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeState {
     active_config: ActiveConfig,
     admission: AdmissionControl,
     listeners: ListenerRegistry,
+    session_plan: SessionPlan,
 }
 
 impl RuntimeState {
     pub fn new(active_config: ActiveConfig) -> Self {
         let admission = AdmissionControl::new(active_config.limits().max_connections);
         let listeners = ListenerRegistry::from_configs(active_config.listeners(), &admission);
+        let session_plan = SessionPlan::from_limits(active_config.limits());
 
         Self {
             active_config,
             admission,
             listeners,
+            session_plan,
         }
     }
 
@@ -40,8 +44,12 @@ impl RuntimeState {
         &self.listeners
     }
 
+    pub fn session_plan(&self) -> SessionPlan {
+        self.session_plan
+    }
+
     pub async fn spawn_accept_loops(&self) -> Result<Vec<ListenerTaskHandle>, Error> {
-        spawn_registry_accept_loops(&self.listeners, &self.admission).await
+        spawn_registry_accept_loops(&self.listeners, &self.admission, self.session_plan).await
     }
 }
 

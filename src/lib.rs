@@ -11,7 +11,8 @@ pub mod relay;
 pub mod runtime;
 pub mod session;
 pub mod subscription;
+pub mod upstream;
 
 pub fn status_line() -> &'static str {
-    "wanglin-proxy can bind listeners, accept downstream TCP sessions, and parse a narrow SOCKS5 CONNECT path."
+    "wanglin-proxy can bind listeners, proxy a direct SOCKS5 CONNECT path, and relay TCP traffic with bounded buffers."
 }
