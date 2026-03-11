@@ -1,4 +1,8 @@
+use crate::adapter::clash::ClashLevelBAdapter;
 use crate::config::external::ExternalConfigSource;
+use crate::config::external::ExternalDocument;
+use crate::error::Error;
+use crate::provider::cache::{CacheActivation, CacheStore};
 
 #[derive(Debug, Clone)]
 pub struct SubscriptionPlan {
@@ -27,4 +31,19 @@ pub fn describe_update_flow() -> &'static [&'static str] {
         "persist last-known-good cache",
         "activate validated snapshot",
     ]
+}
+
+pub fn ingest_clash_document(
+    adapter: &ClashLevelBAdapter,
+    document: &ExternalDocument,
+) -> Result<crate::config::internal::ActiveConfig, Error> {
+    adapter.translate(document)
+}
+
+pub fn ingest_clash_document_with_cache(
+    adapter: &ClashLevelBAdapter,
+    cache: &CacheStore,
+    document: &ExternalDocument,
+) -> Result<CacheActivation, Error> {
+    cache.activate_candidate(adapter.translate(document))
 }

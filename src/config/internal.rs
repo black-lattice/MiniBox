@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::external::{
     AdminInput, ExternalConfig, GroupStrategyInput, ListenerProtocolInput, TargetRefInput,
 };
@@ -13,25 +15,25 @@ pub const MAX_RELAY_BUFFER_BYTES: usize = 1024 * 1024;
 pub const MAX_SAFE_CONNECTIONS: usize = 65_536;
 pub const DEFAULT_ADMIN_BIND: &str = "127.0.0.1:9090";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProtocolKind {
     Socks5,
     HttpConnect,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GroupStrategy {
     Select,
     Fallback,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TargetRef {
     Node(String),
     Group(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfigOrigin {
     Inline,
     Provider {
@@ -43,7 +45,7 @@ pub enum ConfigOrigin {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListenerConfig {
     pub name: String,
     pub bind: String,
@@ -51,14 +53,14 @@ pub struct ListenerConfig {
     pub target: TargetRef,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub name: String,
     pub address: String,
     pub origin: ConfigOrigin,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupConfig {
     pub name: String,
     pub strategy: GroupStrategy,
@@ -66,20 +68,20 @@ pub struct GroupConfig {
     pub origin: ConfigOrigin,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscriptionConfig {
     pub name: String,
     pub source: crate::config::external::ExternalConfigSource,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub name: String,
     pub subscription: String,
     pub update_interval_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminConfig {
     pub enabled: bool,
     pub bind: Option<String>,
@@ -96,7 +98,7 @@ impl Default for AdminConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Limits {
     pub max_connections: usize,
     pub relay_buffer_bytes: usize,
@@ -111,7 +113,7 @@ impl Default for Limits {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ConfigSnapshot {
     listeners: Vec<ListenerConfig>,
     nodes: Vec<NodeConfig>,
@@ -185,6 +187,29 @@ impl Default for ActiveConfig {
 }
 
 impl ConfigSnapshot {
+    pub fn from_parts(
+        listeners: Vec<ListenerConfig>,
+        nodes: Vec<NodeConfig>,
+        groups: Vec<GroupConfig>,
+        subscriptions: Vec<SubscriptionConfig>,
+        providers: Vec<ProviderConfig>,
+        limits: Limits,
+        admin: AdminConfig,
+    ) -> Result<Self, Error> {
+        let snapshot = Self {
+            listeners,
+            nodes,
+            groups,
+            subscriptions,
+            providers,
+            limits,
+            admin,
+        };
+
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
     pub fn from_external(external: ExternalConfig) -> Result<Self, Error> {
         let subscriptions = normalize_subscriptions(external.subscriptions)?;
         let subscription_names =

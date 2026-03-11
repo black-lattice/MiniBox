@@ -1,18 +1,20 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ListenerProtocolInput {
     Socks5,
     HttpConnect,
     Mixed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GroupStrategyInput {
     Select,
     Fallback,
     UrlTest,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TargetRefInput {
     Node(String),
     Group(String),
@@ -28,13 +30,13 @@ impl TargetRefInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExternalConfigSource {
     LocalFile { path: String },
     ClashSubscription { url: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListenerInput {
     pub name: String,
     pub bind: String,
@@ -42,7 +44,7 @@ pub struct ListenerInput {
     pub target: TargetRefInput,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeInput {
     pub name: String,
     pub address: String,
@@ -50,7 +52,7 @@ pub struct NodeInput {
     pub subscription: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupInput {
     pub name: String,
     pub strategy: GroupStrategyInput,
@@ -59,33 +61,33 @@ pub struct GroupInput {
     pub subscription: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LimitsInput {
     pub max_connections: Option<usize>,
     pub relay_buffer_bytes: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AdminInput {
     pub enabled: bool,
     pub bind: Option<String>,
     pub access_token: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscriptionInput {
     pub name: String,
     pub source: ExternalConfigSource,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderInput {
     pub name: String,
     pub subscription: String,
     pub update_interval_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ExternalConfig {
     pub listeners: Vec<ListenerInput>,
     pub nodes: Vec<NodeInput>,
@@ -96,7 +98,7 @@ pub struct ExternalConfig {
     pub admin: AdminInput,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalDocument {
     pub source: ExternalConfigSource,
     pub raw: String,
