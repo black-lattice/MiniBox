@@ -9,8 +9,9 @@ pub mod protocol;
 pub mod provider;
 pub mod relay;
 pub mod runtime;
+pub mod session;
 pub mod subscription;
 
 pub fn status_line() -> &'static str {
-    "wanglin-proxy has config-driven listener scaffolding and a narrow SOCKS5 protocol foundation."
+    "wanglin-proxy can bind listeners, accept downstream TCP sessions, and parse a narrow SOCKS5 CONNECT path."
 }

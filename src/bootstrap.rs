@@ -10,12 +10,13 @@ pub struct StartupPlan {
 
 pub fn build_startup_plan() -> StartupPlan {
     StartupPlan {
-        current_phase: "listener framework + SOCKS5 foundation",
+        current_phase: "listener accept-loop + SOCKS5 session skeleton",
         clash_support_boundary: "level B: nodes + groups, without full rule compatibility",
         steps: &[
             "validate internal config snapshot",
             "prepare listener registry and shared admission control",
-            "parse SOCKS5 negotiation and CONNECT requests",
+            "bind configured listeners and accept downstream TCP sessions",
+            "parse SOCKS5 negotiation and CONNECT requests into session targets",
             "keep HTTP CONNECT on placeholder-only compilation support",
             "add relay pipeline",
             "add metrics and logging",

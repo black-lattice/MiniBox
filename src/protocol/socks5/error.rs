@@ -39,3 +39,44 @@ impl Display for Socks5Error {
 }
 
 impl std::error::Error for Socks5Error {}
+
+#[derive(Debug)]
+pub enum Socks5HandshakeError {
+    Io(std::io::Error),
+    Protocol(Socks5Error),
+    NoAcceptableAuthMethod,
+}
+
+impl Display for Socks5HandshakeError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "SOCKS5 handshake I/O error: {error}"),
+            Self::Protocol(error) => write!(f, "{error}"),
+            Self::NoAcceptableAuthMethod => {
+                write!(f, "client did not offer the required SOCKS5 no-auth method")
+            }
+        }
+    }
+}
+
+impl std::error::Error for Socks5HandshakeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Protocol(error) => Some(error),
+            Self::NoAcceptableAuthMethod => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for Socks5HandshakeError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<Socks5Error> for Socks5HandshakeError {
+    fn from(error: Socks5Error) -> Self {
+        Self::Protocol(error)
+    }
+}
