@@ -1,6 +1,6 @@
-use std::net::{Ipv4Addr, Ipv6Addr};
-
 pub const VERSION: u8 = 0x05;
+
+use crate::session::{TargetAddr, TargetEndpoint};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMethod {
@@ -81,13 +81,6 @@ impl AddressKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TargetAddr {
-    Ipv4(Ipv4Addr),
-    Domain(String),
-    Ipv6(Ipv6Addr),
-}
-
 impl TargetAddr {
     pub fn kind(&self) -> AddressKind {
         match self {
@@ -96,12 +89,6 @@ impl TargetAddr {
             Self::Ipv6(_) => AddressKind::Ipv6,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TargetEndpoint {
-    pub address: TargetAddr,
-    pub port: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

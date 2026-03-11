@@ -306,6 +306,149 @@ mod tests {
         assert!(join.is_cancelled());
     }
 
+    #[tokio::test]
+    async fn accept_loop_relays_successful_http_connect_session() {
+        let (target_addr, target_task) = match spawn_echo_server().await {
+            Ok(server) => server,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("echo listener should bind: {error}"),
+        };
+        let listener = prepare_listener(ListenerPlan {
+            name: "local-connect".to_string(),
+            bind: "127.0.0.1:0".to_string(),
+            protocol: ProtocolKind::HttpConnect,
+            target: TargetRef::Node("node-a".to_string()),
+            handler: crate::listener::ListenerHandler::HttpConnect,
+            admission: crate::listener::ListenerAdmissionPlan { shared_limit: 4 },
+        });
+
+        let handle = match spawn_prepared_listener(
+            listener,
+            AdmissionControl::new(4),
+            SessionPlan::from_limits(&Limits::default()),
+        )
+        .await
+        {
+            Ok(handle) => handle,
+            Err(crate::error::Error::Io(message))
+                if message.contains("Operation not permitted") =>
+            {
+                return;
+            }
+            Err(error) => panic!("listener should bind: {error}"),
+        };
+
+        let mut client = TcpStream::connect(handle.local_addr())
+            .await
+            .expect("client should connect");
+        let payload = b"ping through proxy";
+
+        client
+            .write_all(
+                format!(
+                    "CONNECT 127.0.0.1:{} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+                    target_addr.port(),
+                    target_addr.port()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write connect request");
+        client
+            .write_all(payload)
+            .await
+            .expect("write pipelined tunnel bytes");
+
+        let expected_response = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+        let mut response = vec![0u8; expected_response.len()];
+        timeout(Duration::from_secs(1), client.read_exact(&mut response))
+            .await
+            .expect("success response should arrive")
+            .expect("success response should read");
+        assert_eq!(&response, expected_response);
+
+        let mut echoed = vec![0u8; payload.len()];
+        timeout(Duration::from_secs(1), client.read_exact(&mut echoed))
+            .await
+            .expect("echoed bytes should arrive")
+            .expect("echoed bytes should read");
+        assert_eq!(&echoed, payload);
+
+        client.shutdown().await.expect("client should shut down");
+        timeout(Duration::from_secs(1), target_task)
+            .await
+            .expect("echo task should finish")
+            .expect("echo task should join")
+            .expect("echo task should succeed");
+
+        handle.abort();
+        let join = handle
+            .join()
+            .await
+            .expect_err("accept loop should be cancelled");
+        assert!(join.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn accept_loop_returns_bad_gateway_for_failed_http_connect_upstream_dial() {
+        let listener = prepare_listener(ListenerPlan {
+            name: "local-connect".to_string(),
+            bind: "127.0.0.1:0".to_string(),
+            protocol: ProtocolKind::HttpConnect,
+            target: TargetRef::Node("node-a".to_string()),
+            handler: crate::listener::ListenerHandler::HttpConnect,
+            admission: crate::listener::ListenerAdmissionPlan { shared_limit: 4 },
+        });
+
+        let handle = match spawn_prepared_listener(
+            listener,
+            AdmissionControl::new(4),
+            SessionPlan::from_limits(&Limits::default()),
+        )
+        .await
+        {
+            Ok(handle) => handle,
+            Err(crate::error::Error::Io(message))
+                if message.contains("Operation not permitted") =>
+            {
+                return;
+            }
+            Err(error) => panic!("listener should bind: {error}"),
+        };
+
+        let mut client = TcpStream::connect(handle.local_addr())
+            .await
+            .expect("client should connect");
+        let refused_port = closed_local_port().await;
+
+        client
+            .write_all(
+                format!(
+                    "CONNECT 127.0.0.1:{} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+                    refused_port, refused_port
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write connect request");
+
+        let expected_response =
+            b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let mut response = vec![0u8; expected_response.len()];
+        timeout(Duration::from_secs(1), client.read_exact(&mut response))
+            .await
+            .expect("failure response should arrive")
+            .expect("failure response should read");
+        assert_eq!(&response, expected_response);
+
+        handle.abort();
+        let join = handle
+            .join()
+            .await
+            .expect_err("accept loop should be cancelled");
+        assert!(join.is_cancelled());
+    }
+
     async fn spawn_echo_server() -> std::io::Result<(
         std::net::SocketAddr,
         tokio::task::JoinHandle<std::io::Result<()>>,

@@ -33,7 +33,7 @@
 ## P4: Protocols
 
 - [ ] Implement SOCKS5 protocol handling
-- [ ] Implement HTTP CONNECT protocol handling
+- [x] Implement HTTP CONNECT protocol handling
 - [ ] Add protocol-focused tests for negotiation and failure paths
 
 ## P5: Relay Pipeline

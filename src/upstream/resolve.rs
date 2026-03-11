@@ -1,8 +1,7 @@
 use std::fmt::{Display, Formatter};
 use std::net::IpAddr;
 
-use crate::protocol::socks5::TargetAddr;
-use crate::session::SessionRequest;
+use crate::session::{SessionRequest, TargetAddr};
 use crate::upstream::{DialTarget, DialTargetHost};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,8 +45,9 @@ mod tests {
 
     use super::{ResolveError, resolve_connect_target};
     use crate::config::internal::TargetRef;
-    use crate::protocol::socks5::{TargetAddr, TargetEndpoint};
-    use crate::session::{SessionContext, SessionProtocol, SessionRequest};
+    use crate::session::{
+        SessionContext, SessionProtocol, SessionRequest, TargetAddr, TargetEndpoint,
+    };
     use crate::upstream::{DialTarget, DialTargetHost};
 
     #[test]

@@ -14,5 +14,5 @@ pub mod subscription;
 pub mod upstream;
 
 pub fn status_line() -> &'static str {
-    "wanglin-proxy can bind listeners, proxy a direct SOCKS5 CONNECT path, and relay TCP traffic with bounded buffers."
+    "wanglin-proxy can bind listeners, accept direct SOCKS5 and HTTP CONNECT tunnels, and relay TCP traffic with bounded buffers."
 }

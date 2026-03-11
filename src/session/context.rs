@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use crate::config::internal::TargetRef;
 use crate::listener::{ListenerHandler, ListenerPlan};
-use crate::protocol::socks5::TargetEndpoint;
+use crate::session::TargetEndpoint;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionProtocol {

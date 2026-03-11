@@ -1,6 +1,5 @@
-use crate::protocol::socks5::types::{
-    MethodSelection, Response, TargetAddr, TargetEndpoint, VERSION,
-};
+use crate::protocol::socks5::types::{MethodSelection, Response, VERSION};
+use crate::session::{TargetAddr, TargetEndpoint};
 
 pub fn encode_method_selection(selection: MethodSelection) -> [u8; 2] {
     [VERSION, selection.method.to_byte()]

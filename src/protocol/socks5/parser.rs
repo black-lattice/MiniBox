@@ -1,9 +1,8 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::protocol::socks5::error::Socks5Error;
-use crate::protocol::socks5::types::{
-    AuthMethod, Command, Greeting, Request, TargetAddr, TargetEndpoint, VERSION,
-};
+use crate::protocol::socks5::types::{AuthMethod, Command, Greeting, Request, VERSION};
+use crate::session::{TargetAddr, TargetEndpoint};
 
 pub fn parse_greeting(input: &[u8]) -> Result<(Greeting, usize), Socks5Error> {
     let header = input.get(..2).ok_or(Socks5Error::Truncated {

@@ -5,9 +5,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::protocol::socks5::codec::{encode_method_selection, encode_response};
 use crate::protocol::socks5::error::{Socks5Error, Socks5HandshakeError};
 use crate::protocol::socks5::parser::{parse_greeting, parse_request};
-use crate::protocol::socks5::types::{
-    AuthMethod, MethodSelection, ReplyCode, Request, Response, TargetAddr, TargetEndpoint,
-};
+use crate::protocol::socks5::types::{AuthMethod, MethodSelection, ReplyCode, Request, Response};
+use crate::session::{TargetAddr, TargetEndpoint};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Socks5Handler;

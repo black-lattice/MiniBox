@@ -1,10 +1,10 @@
-use crate::config::internal::ListenerConfig;
+mod codec;
+mod error;
+mod handler;
+mod parser;
+mod types;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct HttpConnectHandler;
-
-impl HttpConnectHandler {
-    pub fn listener_name<'a>(&self, listener: &'a ListenerConfig) -> &'a str {
-        &listener.name
-    }
-}
+pub use error::{HttpConnectError, HttpConnectHandshakeError};
+pub use handler::HttpConnectHandler;
+pub use parser::parse_request;
+pub use types::{AcceptedRequest, Request, StatusCode, Version};
