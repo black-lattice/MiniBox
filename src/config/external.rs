@@ -1,0 +1,112 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListenerProtocolInput {
+    Socks5,
+    HttpConnect,
+    Mixed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupStrategyInput {
+    Select,
+    Fallback,
+    UrlTest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetRefInput {
+    Node(String),
+    Group(String),
+}
+
+impl TargetRefInput {
+    pub fn node(name: impl Into<String>) -> Self {
+        Self::Node(name.into())
+    }
+
+    pub fn group(name: impl Into<String>) -> Self {
+        Self::Group(name.into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalConfigSource {
+    LocalFile { path: String },
+    ClashSubscription { url: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListenerInput {
+    pub name: String,
+    pub bind: String,
+    pub protocol: ListenerProtocolInput,
+    pub target: TargetRefInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeInput {
+    pub name: String,
+    pub address: String,
+    pub provider: Option<String>,
+    pub subscription: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupInput {
+    pub name: String,
+    pub strategy: GroupStrategyInput,
+    pub members: Vec<TargetRefInput>,
+    pub provider: Option<String>,
+    pub subscription: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LimitsInput {
+    pub max_connections: Option<usize>,
+    pub relay_buffer_bytes: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AdminInput {
+    pub enabled: bool,
+    pub bind: Option<String>,
+    pub access_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionInput {
+    pub name: String,
+    pub source: ExternalConfigSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderInput {
+    pub name: String,
+    pub subscription: String,
+    pub update_interval_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ExternalConfig {
+    pub listeners: Vec<ListenerInput>,
+    pub nodes: Vec<NodeInput>,
+    pub groups: Vec<GroupInput>,
+    pub subscriptions: Vec<SubscriptionInput>,
+    pub providers: Vec<ProviderInput>,
+    pub limits: LimitsInput,
+    pub admin: AdminInput,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalDocument {
+    pub source: ExternalConfigSource,
+    pub raw: String,
+}
+
+impl ExternalDocument {
+    pub fn new(source: ExternalConfigSource, raw: impl Into<String>) -> Self {
+        Self {
+            source,
+            raw: raw.into(),
+        }
+    }
+}
