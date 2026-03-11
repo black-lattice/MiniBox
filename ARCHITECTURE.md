@@ -1,8 +1,8 @@
-# wanglin-proxy Architecture
+# MiniBox Architecture
 
 ## Overview
 
-`wanglin-proxy` is a single-process Rust service with a narrow, planning-first architecture. The main design constraint is that external compatibility work must not distort the proxy core.
+`MiniBox` is a single-process Rust service with a narrow, planning-first architecture. The main design constraint is that external compatibility work must not distort the proxy core.
 
 The architecture is intentionally divided into three layers:
 
@@ -52,7 +52,7 @@ Responsibilities:
 
 - define normalized runtime-facing listeners, nodes, groups, and limits
 - validate invariants needed by the runtime
-- represent exactly the features that `wanglin-proxy` supports
+- represent exactly the features that `MiniBox` supports
 - serve as the translation target for external config sources
 
 Properties:

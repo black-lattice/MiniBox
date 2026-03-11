@@ -1,6 +1,6 @@
-# wanglin-proxy
+# MiniBox
 
-`wanglin-proxy` is a planning-first Rust proxy aimed at self-hosters and power users who want a lightweight daily-use proxy with explicit boundaries and low operational overhead.
+`MiniBox` is a planning-first Rust proxy aimed at self-hosters and power users who want a lightweight daily-use proxy with explicit boundaries and low operational overhead.
 
 The repository now contains an implementation skeleton only. There is no full proxy data path yet, and there is no claim of feature completeness.
 
@@ -32,7 +32,7 @@ Explicitly out of scope for the MVP:
 
 - docs updated for level-B Clash subscription support
 - minimal Rust crate skeleton present
-- no real proxy implementation yet
+- initial structured logging, metrics, and health/readiness planning hooks present
 - `cargo build` should succeed as a baseline integrity check
 
 ## Implementation Order
@@ -42,7 +42,7 @@ Explicitly out of scope for the MVP:
 3. SOCKS5
 4. HTTP CONNECT
 5. relay pipeline
-6. metrics and logging
+6. operations surfaces: logging, metrics, and probes
 7. Clash subscription adapter
 8. provider cache and rollback hardening
 

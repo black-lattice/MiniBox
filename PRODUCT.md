@@ -1,14 +1,14 @@
-# wanglin-proxy Product Definition
+# MiniBox Product Definition
 
 ## Purpose
 
-`wanglin-proxy` is a lightweight Rust proxy for self-hosters and power users who want a small, understandable daily-use proxy binary rather than a large integrated platform.
+`MiniBox` is a lightweight Rust proxy for self-hosters and power users who want a small, understandable daily-use proxy binary rather than a large integrated platform.
 
 The project remains planning-first. The implementation should grow from a narrow core with explicit boundaries, stable operations, and low memory overhead.
 
 ## Product Position
 
-`wanglin-proxy` is intended to sit between:
+`MiniBox` is intended to sit between:
 
 - full-featured desktop proxy stacks with broad compatibility but high complexity
 - ad hoc local proxy scripts and one-off tunnels that are hard to operate reliably

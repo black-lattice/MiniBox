@@ -1,4 +1,4 @@
-# wanglin-proxy TODO
+# MiniBox TODO
 
 ## P0: Planning Baseline
 
@@ -13,7 +13,7 @@
 
 - [x] Add `src/lib.rs` and module skeletons matching the planning docs
 - [ ] Keep the crate buildable while modules remain placeholder-only
-- [ ] Add crate conventions for errors, logging, and metrics surfaces
+- [x] Add crate conventions for errors, logging, and metrics surfaces
 - [ ] Add linting and formatting configuration
 - [ ] Add CI for build, test, fmt, and clippy
 
@@ -45,6 +45,7 @@
 
 ## P6: Metrics and Logging
 
+- [x] Add typed descriptors for logging events, metrics, and health/readiness probes
 - [ ] Implement structured logging initialization
 - [ ] Implement low-cardinality runtime metrics
 - [ ] Add health and readiness surfaces

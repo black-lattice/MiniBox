@@ -1,3 +1,4 @@
+use crate::operations::OperationsPlan;
 use crate::subscription::SubscriptionPlan;
 
 #[derive(Debug, Clone)]
@@ -5,6 +6,7 @@ pub struct StartupPlan {
     pub current_phase: &'static str,
     pub clash_support_boundary: &'static str,
     pub steps: &'static [&'static str],
+    pub operations: OperationsPlan,
     pub subscription: SubscriptionPlan,
 }
 
@@ -18,9 +20,10 @@ pub fn build_startup_plan() -> StartupPlan {
             "bind configured listeners and accept downstream TCP sessions",
             "parse SOCKS5 and HTTP CONNECT requests into session targets",
             "add relay pipeline",
-            "add metrics and logging",
+            "wire structured logging, metrics, and probe surfaces",
             "add Clash adapter and cache rollback",
         ],
+        operations: OperationsPlan::default(),
         subscription: SubscriptionPlan::default(),
     }
 }

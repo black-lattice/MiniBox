@@ -1,4 +1,4 @@
-# wanglin-proxy Module Plan
+# MiniBox Module Plan
 
 ## Crate Layout
 
@@ -10,11 +10,13 @@ Proposed layout:
 - `src/lib.rs`
 - `src/bootstrap.rs`
 - `src/error.rs`
+- `src/health.rs`
 - `src/runtime.rs`
 - `src/listener.rs`
 - `src/relay.rs`
 - `src/metrics.rs`
 - `src/logging.rs`
+- `src/operations.rs`
 - `src/subscription.rs`
 - `src/adapter/mod.rs`
 - `src/adapter/clash.rs`
@@ -38,8 +40,10 @@ Modules:
 - `listener`
 - `protocol/*`
 - `relay`
+- `health`
 - `metrics`
 - `logging`
+- `operations`
 
 Rules:
 
@@ -143,11 +147,25 @@ Responsibility:
 - placeholder for runtime and adapter-visible counters
 - keep metric surfaces intentionally low-cardinality
 
+### `health`
+
+Responsibility:
+
+- define liveness and readiness probe descriptors
+- keep health signaling separate from future transport or admin-server choices
+
 ### `logging`
 
 Responsibility:
 
 - central place for logging initialization and event taxonomy planning
+
+### `operations`
+
+Responsibility:
+
+- group logging, metrics, and probe planning into a single startup-facing surface
+- keep early operational hooks explicit without introducing a full admin server yet
 
 ### `subscription`
 
