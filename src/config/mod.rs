@@ -1,5 +1,6 @@
 pub mod external;
 pub mod internal;
+pub mod load;
 
 pub use external::{
     AdminInput, ExternalConfig, ExternalConfigSource, ExternalDocument, GroupInput,
