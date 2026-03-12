@@ -38,6 +38,12 @@ impl Default for LoggingPlan {
     }
 }
 
+impl LoggingPlan {
+    pub fn event(&self, name: &str) -> Option<LogEvent> {
+        self.events.iter().copied().find(|event| event.name == name)
+    }
+}
+
 pub const DEFAULT_LOG_EVENTS: &[LogEvent] = &[
     LogEvent {
         name: "startup.begin",

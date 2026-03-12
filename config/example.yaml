@@ -1,0 +1,11 @@
+listeners:
+  - name: local-socks
+    bind: 127.0.0.1:1080
+    protocol: Socks5
+    target:
+      Node: default-upstream
+nodes:
+  - name: default-upstream
+    address: 1.1.1.1:443
+    provider: null
+    subscription: null

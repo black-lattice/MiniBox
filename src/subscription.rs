@@ -64,12 +64,12 @@ pub struct ConfigActivation {
     pub translation_error: Option<Error>,
 }
 
-pub fn load_active_config_from_source(
+pub async fn load_active_config_from_source(
     adapter: &ClashLevelBAdapter,
     cache: Option<&CacheStore>,
     source: &ExternalConfigSource,
 ) -> Result<ConfigActivation, Error> {
-    let document = read_source_document(source)?;
+    let document = read_source_document(source).await?;
     load_active_config_from_document(adapter, cache, &document)
 }
 
