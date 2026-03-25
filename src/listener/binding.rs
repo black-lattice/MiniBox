@@ -40,11 +40,7 @@ pub async fn bind_listener(plan: ListenerPlan) -> Result<BoundListener, Error> {
         ))
     })?;
 
-    Ok(BoundListener {
-        plan,
-        local_addr,
-        listener,
-    })
+    Ok(BoundListener { plan, local_addr, listener })
 }
 
 pub async fn bind_prepared_listener(listener: PreparedListener) -> Result<BoundListener, Error> {

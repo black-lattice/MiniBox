@@ -19,13 +19,11 @@ impl Socks5Handler {
         let greeting = self.read_greeting(stream).await?;
 
         if !greeting.supports_no_auth() {
-            self.write_method_selection(stream, AuthMethod::NoAcceptableMethods)
-                .await?;
+            self.write_method_selection(stream, AuthMethod::NoAcceptableMethods).await?;
             return Err(Socks5HandshakeError::NoAcceptableAuthMethod);
         }
 
-        self.write_method_selection(stream, AuthMethod::NoAuth)
-            .await?;
+        self.write_method_selection(stream, AuthMethod::NoAuth).await?;
         self.read_request(stream).await
     }
 
@@ -33,14 +31,7 @@ impl Socks5Handler {
     where
         S: AsyncWrite + Unpin,
     {
-        self.send_response(
-            stream,
-            Response {
-                reply,
-                bind: failure_bind_addr(),
-            },
-        )
-        .await
+        self.send_response(stream, Response { reply, bind: failure_bind_addr() }).await
     }
 
     pub async fn send_success_reply<S>(
@@ -51,14 +42,7 @@ impl Socks5Handler {
     where
         S: AsyncWrite + Unpin,
     {
-        self.send_response(
-            stream,
-            Response {
-                reply: ReplyCode::Succeeded,
-                bind,
-            },
-        )
-        .await
+        self.send_response(stream, Response { reply: ReplyCode::Succeeded, bind }).await
     }
 
     async fn send_response<S>(&self, stream: &mut S, response: Response) -> std::io::Result<()>
@@ -147,10 +131,7 @@ impl Socks5Handler {
 }
 
 fn failure_bind_addr() -> TargetEndpoint {
-    TargetEndpoint {
-        address: TargetAddr::Ipv4(Ipv4Addr::UNSPECIFIED),
-        port: 0,
-    }
+    TargetEndpoint { address: TargetAddr::Ipv4(Ipv4Addr::UNSPECIFIED), port: 0 }
 }
 
 fn reply_code_for_error(error: &Socks5Error) -> Option<ReplyCode> {
@@ -182,16 +163,10 @@ mod tests {
         let server_task =
             tokio::spawn(async move { Socks5Handler.accept_connect(&mut server).await });
 
-        client
-            .write_all(&[0x05, 0x01, 0x00])
-            .await
-            .expect("write greeting");
+        client.write_all(&[0x05, 0x01, 0x00]).await.expect("write greeting");
 
         let mut selection = [0u8; 2];
-        client
-            .read_exact(&mut selection)
-            .await
-            .expect("read no-auth selection");
+        client.read_exact(&mut selection).await.expect("read no-auth selection");
         assert_eq!(selection, [0x05, 0x00]);
 
         client
@@ -199,10 +174,8 @@ mod tests {
             .await
             .expect("write connect request");
 
-        let request = server_task
-            .await
-            .expect("server task should join")
-            .expect("request should parse");
+        let request =
+            server_task.await.expect("server task should join").expect("request should parse");
 
         assert_eq!(
             request,
@@ -223,16 +196,10 @@ mod tests {
         let server_task =
             tokio::spawn(async move { Socks5Handler.accept_connect(&mut server).await });
 
-        client
-            .write_all(&[0x05, 0x01, 0x02])
-            .await
-            .expect("write unsupported auth methods");
+        client.write_all(&[0x05, 0x01, 0x02]).await.expect("write unsupported auth methods");
 
         let mut selection = [0u8; 2];
-        client
-            .read_exact(&mut selection)
-            .await
-            .expect("read failure selection");
+        client.read_exact(&mut selection).await.expect("read failure selection");
         assert_eq!(selection, [0x05, 0xff]);
 
         let error = server_task
@@ -240,10 +207,7 @@ mod tests {
             .expect("server task should join")
             .expect_err("handshake should reject unsupported auth methods");
 
-        assert!(matches!(
-            error,
-            Socks5HandshakeError::NoAcceptableAuthMethod
-        ));
+        assert!(matches!(error, Socks5HandshakeError::NoAcceptableAuthMethod));
     }
 
     #[tokio::test]
@@ -253,16 +217,10 @@ mod tests {
         let server_task =
             tokio::spawn(async move { Socks5Handler.accept_connect(&mut server).await });
 
-        client
-            .write_all(&[0x05, 0x01, 0x00])
-            .await
-            .expect("write greeting");
+        client.write_all(&[0x05, 0x01, 0x00]).await.expect("write greeting");
 
         let mut selection = [0u8; 2];
-        client
-            .read_exact(&mut selection)
-            .await
-            .expect("read no-auth selection");
+        client.read_exact(&mut selection).await.expect("read no-auth selection");
         assert_eq!(selection, [0x05, 0x00]);
 
         client
@@ -271,10 +229,7 @@ mod tests {
             .expect("write unsupported command request");
 
         let mut response = [0u8; 10];
-        client
-            .read_exact(&mut response)
-            .await
-            .expect("read failure response");
+        client.read_exact(&mut response).await.expect("read failure response");
         assert_eq!(response, [0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
 
         let error = server_task

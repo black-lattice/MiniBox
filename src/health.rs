@@ -52,11 +52,33 @@ impl ProbeSnapshot {
             ProbeKind::Readiness => "listeners bound and active config loaded",
         };
 
-        Self {
-            kind,
-            status: ProbeStatus::Starting,
-            detail,
+        Self { kind, status: ProbeStatus::Starting, detail }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeReport {
+    pub kind: ProbeKind,
+    pub status: ProbeStatus,
+    pub detail: String,
+}
+
+impl ProbeReport {
+    pub fn http_status_code(&self) -> u16 {
+        match (self.kind, self.status) {
+            (ProbeKind::Liveness, _) => 200,
+            (_, ProbeStatus::Ready) => 200,
+            _ => 503,
         }
+    }
+
+    pub fn render_text_body(&self) -> String {
+        format!(
+            "kind={}\nstatus={}\ndetail={}\n",
+            self.kind.as_str(),
+            self.status.as_str(),
+            self.detail
+        )
     }
 }
 
@@ -68,10 +90,7 @@ pub struct HealthPlan {
 
 impl Default for HealthPlan {
     fn default() -> Self {
-        Self {
-            liveness: LIVENESS_PROBE,
-            readiness: READINESS_PROBE,
-        }
+        Self { liveness: LIVENESS_PROBE, readiness: READINESS_PROBE }
     }
 }
 
@@ -91,7 +110,7 @@ pub const READINESS_PROBE: ProbeDescriptor = ProbeDescriptor {
 
 #[cfg(test)]
 mod tests {
-    use super::{HealthPlan, ProbeKind, ProbeSnapshot, ProbeStatus};
+    use super::{HealthPlan, ProbeKind, ProbeReport, ProbeSnapshot, ProbeStatus};
 
     #[test]
     fn health_plan_exposes_separate_probe_intents() {
@@ -108,5 +127,17 @@ mod tests {
 
         assert_eq!(snapshot.status, ProbeStatus::Starting);
         assert_eq!(snapshot.detail, "listeners bound and active config loaded");
+    }
+
+    #[test]
+    fn readiness_report_maps_starting_state_to_unavailable_http_status() {
+        let report = ProbeReport {
+            kind: ProbeKind::Readiness,
+            status: ProbeStatus::Starting,
+            detail: "listeners not yet bound".to_string(),
+        };
+
+        assert_eq!(report.http_status_code(), 503);
+        assert!(report.render_text_body().contains("status=starting"));
     }
 }

@@ -4,7 +4,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::config::external::{
-    AdminInput, ExternalConfig, GroupStrategyInput, ListenerProtocolInput, TargetRefInput,
+    AdminInput, ExternalConfig, GroupStrategyInput, ListenerProtocolInput, NodeKindInput,
+    TargetRefInput,
 };
 use crate::error::Error;
 
@@ -27,6 +28,22 @@ pub enum GroupStrategy {
     Fallback,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum NodeKind {
+    #[default]
+    DirectTcp,
+    Trojan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrojanNodeConfig {
+    pub server: String,
+    pub port: u16,
+    pub password: String,
+    pub sni: Option<String>,
+    pub skip_cert_verify: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TargetRef {
     Node(String),
@@ -36,13 +53,8 @@ pub enum TargetRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfigOrigin {
     Inline,
-    Provider {
-        provider: String,
-        subscription: String,
-    },
-    Subscription {
-        subscription: String,
-    },
+    Provider { provider: String, subscription: String },
+    Subscription { subscription: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,7 +68,9 @@ pub struct ListenerConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub name: String,
-    pub address: String,
+    #[serde(default)]
+    pub kind: NodeKind,
+    pub trojan: Option<TrojanNodeConfig>,
     pub origin: ConfigOrigin,
 }
 
@@ -81,21 +95,11 @@ pub struct ProviderConfig {
     pub update_interval_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AdminConfig {
     pub enabled: bool,
     pub bind: Option<String>,
     pub access_token: Option<String>,
-}
-
-impl Default for AdminConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            bind: None,
-            access_token: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,9 +136,7 @@ pub struct ActiveConfig {
 impl ActiveConfig {
     pub fn new(snapshot: ConfigSnapshot) -> Result<Self, Error> {
         snapshot.validate()?;
-        Ok(Self {
-            snapshot: Arc::new(snapshot),
-        })
+        Ok(Self { snapshot: Arc::new(snapshot) })
     }
 
     pub fn from_external(external: ExternalConfig) -> Result<Self, Error> {
@@ -176,13 +178,15 @@ impl ActiveConfig {
     pub fn validate(&self) -> Result<(), Error> {
         self.snapshot.validate()
     }
+
+    pub fn resolve_target_node(&self, target: &TargetRef) -> Result<&NodeConfig, Error> {
+        self.snapshot.resolve_target_node(target)
+    }
 }
 
 impl Default for ActiveConfig {
     fn default() -> Self {
-        Self {
-            snapshot: Arc::new(ConfigSnapshot::default()),
-        }
+        Self { snapshot: Arc::new(ConfigSnapshot::default()) }
     }
 }
 
@@ -196,15 +200,7 @@ impl ConfigSnapshot {
         limits: Limits,
         admin: AdminConfig,
     ) -> Result<Self, Error> {
-        let snapshot = Self {
-            listeners,
-            nodes,
-            groups,
-            subscriptions,
-            providers,
-            limits,
-            admin,
-        };
+        let snapshot = Self { listeners, nodes, groups, subscriptions, providers, limits, admin };
 
         snapshot.validate()?;
         Ok(snapshot)
@@ -217,24 +213,13 @@ impl ConfigSnapshot {
         let providers = normalize_providers(external.providers, &subscription_names)?;
         let provider_subscriptions = provider_subscription_map(&providers)?;
         let nodes = normalize_nodes(external.nodes, &provider_subscriptions, &subscription_names)?;
-        let groups = normalize_groups(
-            external.groups,
-            &provider_subscriptions,
-            &subscription_names,
-        )?;
+        let groups =
+            normalize_groups(external.groups, &provider_subscriptions, &subscription_names)?;
         let listeners = normalize_listeners(external.listeners)?;
         let limits = normalize_limits(external.limits)?;
         let admin = normalize_admin(external.admin)?;
 
-        let snapshot = Self {
-            listeners,
-            nodes,
-            groups,
-            subscriptions,
-            providers,
-            limits,
-            admin,
-        };
+        let snapshot = Self { listeners, nodes, groups, subscriptions, providers, limits, admin };
 
         snapshot.validate()?;
         Ok(snapshot)
@@ -269,27 +254,22 @@ impl ConfigSnapshot {
     }
 
     pub fn validate(&self) -> Result<(), Error> {
-        ensure_unique_names("listener", &self.listeners, |listener| {
-            listener.name.as_str()
-        })?;
+        ensure_unique_names("listener", &self.listeners, |listener| listener.name.as_str())?;
         ensure_unique_names("node", &self.nodes, |node| node.name.as_str())?;
         ensure_unique_names("group", &self.groups, |group| group.name.as_str())?;
         ensure_unique_names("subscription", &self.subscriptions, |subscription| {
             subscription.name.as_str()
         })?;
-        ensure_unique_names("provider", &self.providers, |provider| {
-            provider.name.as_str()
-        })?;
+        ensure_unique_names("provider", &self.providers, |provider| provider.name.as_str())?;
         validate_limits(&self.limits)?;
 
         let node_names = collect_names(&self.nodes, |node| node.name.as_str());
         let group_names = collect_names(&self.groups, |group| group.name.as_str());
-        let subscription_names = collect_names(&self.subscriptions, |subscription| {
-            subscription.name.as_str()
-        });
-        let providers_by_name = named_index("provider", &self.providers, |provider| {
-            provider.name.as_str()
-        })?;
+        let subscription_names =
+            collect_names(&self.subscriptions, |subscription| subscription.name.as_str());
+        let providers_by_name =
+            named_index("provider", &self.providers, |provider| provider.name.as_str())?;
+        let groups_by_name = named_index("group", &self.groups, |group| group.name.as_str())?;
 
         for provider in &self.providers {
             if !subscription_names.contains(provider.subscription.as_str()) {
@@ -315,12 +295,41 @@ impl ConfigSnapshot {
                 &providers_by_name,
                 &subscription_names,
             )?;
-
-            if node.address.trim().is_empty() {
-                return Err(Error::validation(format!(
-                    "node '{}' must have a non-empty address",
-                    node.name
-                )));
+            match node.kind {
+                NodeKind::DirectTcp => {
+                    if node.trojan.is_some() {
+                        return Err(Error::validation(format!(
+                            "node '{}' of kind DirectTcp must not include Trojan settings",
+                            node.name
+                        )));
+                    }
+                }
+                NodeKind::Trojan => {
+                    let Some(trojan) = &node.trojan else {
+                        return Err(Error::validation(format!(
+                            "node '{}' of kind Trojan must include Trojan settings",
+                            node.name
+                        )));
+                    };
+                    if trojan.server.trim().is_empty() {
+                        return Err(Error::validation(format!(
+                            "node '{}' of kind Trojan must have a non-empty server",
+                            node.name
+                        )));
+                    }
+                    if trojan.port == 0 {
+                        return Err(Error::validation(format!(
+                            "node '{}' of kind Trojan must have a non-zero port",
+                            node.name
+                        )));
+                    }
+                    if trojan.password.trim().is_empty() {
+                        return Err(Error::validation(format!(
+                            "node '{}' of kind Trojan must have a non-empty password",
+                            node.name
+                        )));
+                    }
+                }
             }
         }
 
@@ -366,7 +375,17 @@ impl ConfigSnapshot {
             )?;
         }
 
+        for group in &self.groups {
+            validate_group_cycles(group, &groups_by_name)?;
+        }
+
         Ok(())
+    }
+
+    pub fn resolve_target_node(&self, target: &TargetRef) -> Result<&NodeConfig, Error> {
+        let mut path = Vec::new();
+
+        resolve_target_node(target, &self.nodes, &self.groups, &mut path)
     }
 }
 
@@ -379,16 +398,10 @@ fn normalize_subscriptions(
     for subscription in subscriptions {
         let name = normalize_name("subscription", subscription.name)?;
         if !seen.insert(name.clone()) {
-            return Err(Error::validation(format!(
-                "duplicate subscription name '{}'",
-                name
-            )));
+            return Err(Error::validation(format!("duplicate subscription name '{}'", name)));
         }
 
-        normalized.push(SubscriptionConfig {
-            name,
-            source: subscription.source,
-        });
+        normalized.push(SubscriptionConfig { name, source: subscription.source });
     }
 
     Ok(normalized)
@@ -404,10 +417,7 @@ fn normalize_providers(
     for provider in providers {
         let name = normalize_name("provider", provider.name)?;
         if !seen.insert(name.clone()) {
-            return Err(Error::validation(format!(
-                "duplicate provider name '{}'",
-                name
-            )));
+            return Err(Error::validation(format!("duplicate provider name '{}'", name)));
         }
 
         let subscription = normalize_ref_name("subscription", provider.subscription)?;
@@ -449,7 +459,56 @@ fn normalize_nodes(
             return Err(Error::validation(format!("duplicate node name '{}'", name)));
         }
 
-        let address = normalize_required_field("node", "address", node.address, &name)?;
+        let kind = match node.kind {
+            NodeKindInput::DirectTcp => NodeKind::DirectTcp,
+            NodeKindInput::Trojan => NodeKind::Trojan,
+        };
+        if let Some(address) = node.address.as_deref()
+            && !address.trim().is_empty()
+        {
+            return Err(Error::validation(format!(
+                "node '{}' must not set address because the current node model does not use that field",
+                name
+            )));
+        }
+        let trojan = match kind {
+            NodeKind::DirectTcp => {
+                if node.server.is_some()
+                    || node.port.is_some()
+                    || node.password.is_some()
+                    || node.sni.is_some()
+                    || node.skip_cert_verify
+                {
+                    return Err(Error::validation(format!(
+                        "node '{}' of kind DirectTcp must not include Trojan settings",
+                        name
+                    )));
+                }
+                None
+            }
+            NodeKind::Trojan => Some(TrojanNodeConfig {
+                server: normalize_required_field(
+                    "node",
+                    "server",
+                    node.server.unwrap_or_default(),
+                    &name,
+                )?,
+                port: node.port.ok_or_else(|| {
+                    Error::validation(format!("node '{}' of kind Trojan must include a port", name))
+                })?,
+                password: normalize_required_field(
+                    "node",
+                    "password",
+                    node.password.unwrap_or_default(),
+                    &name,
+                )?,
+                sni: match node.sni {
+                    Some(sni) => Some(normalize_inline_field("node", "sni", sni)?),
+                    None => None,
+                },
+                skip_cert_verify: node.skip_cert_verify,
+            }),
+        };
         let origin = normalize_origin(
             "node",
             &name,
@@ -459,11 +518,7 @@ fn normalize_nodes(
             subscription_names,
         )?;
 
-        normalized.push(NodeConfig {
-            name,
-            address,
-            origin,
-        });
+        normalized.push(NodeConfig { name, kind, trojan, origin });
     }
 
     Ok(normalized)
@@ -480,10 +535,7 @@ fn normalize_groups(
     for group in groups {
         let name = normalize_name("group", group.name)?;
         if !seen.insert(name.clone()) {
-            return Err(Error::validation(format!(
-                "duplicate group name '{}'",
-                name
-            )));
+            return Err(Error::validation(format!("duplicate group name '{}'", name)));
         }
 
         if group.members.is_empty() {
@@ -512,18 +564,10 @@ fn normalize_groups(
             provider_subscriptions,
             subscription_names,
         )?;
-        let members = group
-            .members
-            .into_iter()
-            .map(normalize_target_ref)
-            .collect::<Result<Vec<_>, _>>()?;
+        let members =
+            group.members.into_iter().map(normalize_target_ref).collect::<Result<Vec<_>, _>>()?;
 
-        normalized.push(GroupConfig {
-            name,
-            strategy,
-            members,
-            origin,
-        });
+        normalized.push(GroupConfig { name, strategy, members, origin });
     }
 
     Ok(normalized)
@@ -538,10 +582,7 @@ fn normalize_listeners(
     for listener in listeners {
         let name = normalize_name("listener", listener.name)?;
         if !seen.insert(name.clone()) {
-            return Err(Error::validation(format!(
-                "duplicate listener name '{}'",
-                name
-            )));
+            return Err(Error::validation(format!("duplicate listener name '{}'", name)));
         }
 
         let bind = normalize_required_field("listener", "bind", listener.bind, &name)?;
@@ -570,9 +611,7 @@ fn normalize_listeners(
 fn normalize_limits(input: crate::config::external::LimitsInput) -> Result<Limits, Error> {
     let limits = Limits {
         max_connections: input.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS),
-        relay_buffer_bytes: input
-            .relay_buffer_bytes
-            .unwrap_or(DEFAULT_RELAY_BUFFER_BYTES),
+        relay_buffer_bytes: input.relay_buffer_bytes.unwrap_or(DEFAULT_RELAY_BUFFER_BYTES),
     };
 
     validate_limits(&limits)?;
@@ -591,11 +630,7 @@ fn normalize_admin(input: AdminInput) -> Result<AdminConfig, Error> {
         None => None,
     };
 
-    Ok(AdminConfig {
-        enabled: input.enabled,
-        bind,
-        access_token,
-    })
+    Ok(AdminConfig { enabled: input.enabled, bind, access_token })
 }
 
 fn normalize_origin(
@@ -621,10 +656,7 @@ fn normalize_origin(
                     name, provider
                 )));
             };
-            Ok(ConfigOrigin::Provider {
-                provider,
-                subscription: subscription.clone(),
-            })
+            Ok(ConfigOrigin::Provider { provider, subscription: subscription.clone() })
         }
         (None, Some(subscription)) => {
             let subscription = normalize_ref_name("subscription", subscription)?;
@@ -667,10 +699,7 @@ fn validate_origin(
                 )))
             }
         }
-        ConfigOrigin::Provider {
-            provider,
-            subscription,
-        } => {
+        ConfigOrigin::Provider { provider, subscription } => {
             let Some(provider_config) = providers_by_name.get(provider.as_str()) else {
                 return Err(Error::validation(format!(
                     "{kind} '{}' references missing provider '{}'",
@@ -701,20 +730,14 @@ fn validate_target_ref(
             if node_names.contains(name.as_str()) {
                 Ok(())
             } else {
-                Err(Error::validation(format!(
-                    "{owner} references missing node '{}'",
-                    name
-                )))
+                Err(Error::validation(format!("{owner} references missing node '{}'", name)))
             }
         }
         TargetRef::Group(name) => {
             if group_names.contains(name.as_str()) {
                 Ok(())
             } else {
-                Err(Error::validation(format!(
-                    "{owner} references missing group '{}'",
-                    name
-                )))
+                Err(Error::validation(format!("{owner} references missing group '{}'", name)))
             }
         }
     }
@@ -722,9 +745,7 @@ fn validate_target_ref(
 
 fn validate_limits(limits: &Limits) -> Result<(), Error> {
     if limits.max_connections == 0 {
-        return Err(Error::validation(
-            "unsafe limits: max_connections must be greater than zero",
-        ));
+        return Err(Error::validation("unsafe limits: max_connections must be greater than zero"));
     }
 
     if limits.max_connections > MAX_SAFE_CONNECTIONS {
@@ -751,6 +772,99 @@ fn validate_limits(limits: &Limits) -> Result<(), Error> {
     Ok(())
 }
 
+fn validate_group_cycles(
+    group: &GroupConfig,
+    groups_by_name: &BTreeMap<String, &GroupConfig>,
+) -> Result<(), Error> {
+    let mut stack = Vec::new();
+    let mut active = BTreeSet::new();
+
+    visit_group_cycle(group, groups_by_name, &mut stack, &mut active)
+}
+
+fn visit_group_cycle(
+    group: &GroupConfig,
+    groups_by_name: &BTreeMap<String, &GroupConfig>,
+    stack: &mut Vec<String>,
+    active: &mut BTreeSet<String>,
+) -> Result<(), Error> {
+    if active.contains(group.name.as_str()) {
+        let cycle_start = stack.iter().position(|name| name == group.name.as_str()).unwrap_or(0);
+        let mut cycle = stack[cycle_start..].to_vec();
+        cycle.push(group.name.clone());
+        return Err(Error::validation(format!(
+            "group resolution cycle detected: {}",
+            cycle.join(" -> ")
+        )));
+    }
+
+    stack.push(group.name.clone());
+    active.insert(group.name.clone());
+
+    for member in &group.members {
+        if let TargetRef::Group(name) = member {
+            let nested = groups_by_name.get(name).ok_or_else(|| {
+                Error::validation(format!(
+                    "group '{}' references missing group '{}'",
+                    group.name, name
+                ))
+            })?;
+            visit_group_cycle(nested, groups_by_name, stack, active)?;
+        }
+    }
+
+    stack.pop();
+    active.remove(group.name.as_str());
+    Ok(())
+}
+
+fn resolve_target_node<'a>(
+    target: &TargetRef,
+    nodes: &'a [NodeConfig],
+    groups: &'a [GroupConfig],
+    path: &mut Vec<String>,
+) -> Result<&'a NodeConfig, Error> {
+    match target {
+        TargetRef::Node(name) => find_node(nodes, name).ok_or_else(|| {
+            Error::validation(format!("target resolution references missing node '{}'", name))
+        }),
+        TargetRef::Group(name) => {
+            if path.iter().any(|seen| seen == name) {
+                let cycle_start = path.iter().position(|seen| seen == name).unwrap_or(0);
+                let mut cycle = path[cycle_start..].to_vec();
+                cycle.push(name.clone());
+                return Err(Error::validation(format!(
+                    "group resolution cycle detected: {}",
+                    cycle.join(" -> ")
+                )));
+            }
+
+            let group = find_group(groups, name).ok_or_else(|| {
+                Error::validation(format!("target resolution references missing group '{}'", name))
+            })?;
+            let selected = group.members.first().ok_or_else(|| {
+                Error::validation(format!(
+                    "group '{}' cannot resolve to a node because it has no members",
+                    group.name
+                ))
+            })?;
+
+            path.push(name.clone());
+            let resolved = resolve_target_node(selected, nodes, groups, path);
+            path.pop();
+            resolved
+        }
+    }
+}
+
+fn find_node<'a>(nodes: &'a [NodeConfig], name: &str) -> Option<&'a NodeConfig> {
+    nodes.iter().find(|node| node.name == name)
+}
+
+fn find_group<'a>(groups: &'a [GroupConfig], name: &str) -> Option<&'a GroupConfig> {
+    groups.iter().find(|group| group.name == name)
+}
+
 fn normalize_name(kind: &str, raw: String) -> Result<String, Error> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -763,9 +877,7 @@ fn normalize_name(kind: &str, raw: String) -> Result<String, Error> {
 fn normalize_ref_name(kind: &str, raw: String) -> Result<String, Error> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err(Error::validation(format!(
-            "{kind} reference must not be empty"
-        )));
+        return Err(Error::validation(format!("{kind} reference must not be empty")));
     }
 
     Ok(trimmed.to_string())
@@ -779,10 +891,7 @@ fn normalize_required_field(
 ) -> Result<String, Error> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err(Error::validation(format!(
-            "{kind} '{}' must have a non-empty {field}",
-            name
-        )));
+        return Err(Error::validation(format!("{kind} '{}' must have a non-empty {field}", name)));
     }
 
     Ok(trimmed.to_string())
@@ -791,9 +900,7 @@ fn normalize_required_field(
 fn normalize_inline_field(kind: &str, field: &str, raw: String) -> Result<String, Error> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err(Error::validation(format!(
-            "{kind} {field} must not be empty when set"
-        )));
+        return Err(Error::validation(format!("{kind} {field} must not be empty when set")));
     }
 
     Ok(trimmed.to_string())
@@ -807,10 +914,7 @@ where
     for item in items {
         let name = name_of(item);
         if !seen.insert(name) {
-            return Err(Error::validation(format!(
-                "duplicate {kind} name '{}'",
-                name
-            )));
+            return Err(Error::validation(format!("duplicate {kind} name '{}'", name)));
         }
     }
 
@@ -843,10 +947,7 @@ where
     for item in items {
         let name = name_of(item);
         if index.insert(name.to_string(), item).is_some() {
-            return Err(Error::validation(format!(
-                "duplicate {kind} name '{}'",
-                name
-            )));
+            return Err(Error::validation(format!("duplicate {kind} name '{}'", name)));
         }
     }
 
@@ -862,10 +963,7 @@ fn provider_subscription_map(
             .insert(provider.name.clone(), provider.subscription.clone())
             .is_some()
         {
-            return Err(Error::validation(format!(
-                "duplicate provider name '{}'",
-                provider.name
-            )));
+            return Err(Error::validation(format!("duplicate provider name '{}'", provider.name)));
         }
     }
 
@@ -883,7 +981,7 @@ mod tests {
         LimitsInput, ListenerInput, ListenerProtocolInput, NodeInput, ProviderInput,
         SubscriptionInput, TargetRefInput,
     };
-    use crate::config::internal::{GroupStrategy, ProtocolKind, TargetRef};
+    use crate::config::internal::{GroupStrategy, NodeKind, ProtocolKind, TargetRef};
     use crate::error::Error;
 
     #[test]
@@ -898,13 +996,25 @@ mod tests {
             nodes: vec![
                 NodeInput {
                     name: " local-a ".to_string(),
-                    address: " 1.1.1.1:443 ".to_string(),
+                    kind: crate::config::external::NodeKindInput::DirectTcp,
+                    address: None,
+                    server: None,
+                    port: None,
+                    password: None,
+                    sni: None,
+                    skip_cert_verify: false,
                     provider: None,
                     subscription: None,
                 },
                 NodeInput {
                     name: " remote-a ".to_string(),
-                    address: " 2.2.2.2:443 ".to_string(),
+                    kind: crate::config::external::NodeKindInput::DirectTcp,
+                    address: None,
+                    server: None,
+                    port: None,
+                    password: None,
+                    sni: None,
+                    skip_cert_verify: false,
                     provider: Some(" provider-main ".to_string()),
                     subscription: None,
                 },
@@ -946,25 +1056,18 @@ mod tests {
         assert_eq!(active.subscriptions().len(), 1);
         assert_eq!(active.providers().len(), 1);
         assert_eq!(active.limits().max_connections, DEFAULT_MAX_CONNECTIONS);
-        assert_eq!(
-            active.limits().relay_buffer_bytes,
-            DEFAULT_RELAY_BUFFER_BYTES
-        );
+        assert_eq!(active.limits().relay_buffer_bytes, DEFAULT_RELAY_BUFFER_BYTES);
         assert_eq!(active.admin().bind.as_deref(), Some(DEFAULT_ADMIN_BIND));
         assert_eq!(active.admin().access_token.as_deref(), Some("secret"));
         assert_eq!(active.listeners()[0].name, "local-socks");
         assert_eq!(active.listeners()[0].bind, "127.0.0.1:1080");
         assert_eq!(active.listeners()[0].protocol, ProtocolKind::Socks5);
-        assert_eq!(
-            active.listeners()[0].target,
-            TargetRef::Group("primary".to_string())
-        );
+        assert_eq!(active.listeners()[0].target, TargetRef::Group("primary".to_string()));
+        assert_eq!(active.nodes()[0].kind, NodeKind::DirectTcp);
         assert_eq!(active.groups()[0].strategy, GroupStrategy::Fallback);
         assert_eq!(
             active.groups()[0].origin,
-            ConfigOrigin::Subscription {
-                subscription: "remote-sub".to_string()
-            }
+            ConfigOrigin::Subscription { subscription: "remote-sub".to_string() }
         );
     }
 
@@ -974,13 +1077,25 @@ mod tests {
             nodes: vec![
                 NodeInput {
                     name: "dup".to_string(),
-                    address: "1.1.1.1:443".to_string(),
+                    kind: crate::config::external::NodeKindInput::DirectTcp,
+                    address: None,
+                    server: None,
+                    port: None,
+                    password: None,
+                    sni: None,
+                    skip_cert_verify: false,
                     provider: None,
                     subscription: None,
                 },
                 NodeInput {
                     name: " dup ".to_string(),
-                    address: "2.2.2.2:443".to_string(),
+                    kind: crate::config::external::NodeKindInput::DirectTcp,
+                    address: None,
+                    server: None,
+                    port: None,
+                    password: None,
+                    sni: None,
+                    skip_cert_verify: false,
                     provider: None,
                     subscription: None,
                 },
@@ -1005,10 +1120,7 @@ mod tests {
         };
 
         let error = ActiveConfig::from_external(config).expect_err("missing reference must fail");
-        assert_eq!(
-            error,
-            Error::validation("listener 'socks' references missing group 'missing'")
-        );
+        assert_eq!(error, Error::validation("listener 'socks' references missing group 'missing'"));
     }
 
     #[test]
@@ -1027,7 +1139,13 @@ mod tests {
             }],
             nodes: vec![NodeInput {
                 name: "node-a".to_string(),
-                address: "1.1.1.1:443".to_string(),
+                kind: crate::config::external::NodeKindInput::DirectTcp,
+                address: None,
+                server: None,
+                port: None,
+                password: None,
+                sni: None,
+                skip_cert_verify: false,
                 provider: Some("provider-a".to_string()),
                 subscription: Some("remote".to_string()),
             }],
@@ -1058,19 +1176,13 @@ mod tests {
         };
 
         let error = ActiveConfig::from_external(config).expect_err("empty group must fail");
-        assert_eq!(
-            error,
-            Error::validation("group 'empty' must contain at least one member")
-        );
+        assert_eq!(error, Error::validation("group 'empty' must contain at least one member"));
     }
 
     #[test]
     fn rejects_unsafe_limits() {
         let config = ExternalConfig {
-            limits: LimitsInput {
-                max_connections: Some(0),
-                relay_buffer_bytes: Some(512),
-            },
+            limits: LimitsInput { max_connections: Some(0), relay_buffer_bytes: Some(512) },
             ..ExternalConfig::default()
         };
 
@@ -1092,7 +1204,13 @@ mod tests {
             }],
             nodes: vec![NodeInput {
                 name: "node-a".to_string(),
-                address: "1.1.1.1:443".to_string(),
+                kind: crate::config::external::NodeKindInput::DirectTcp,
+                address: None,
+                server: None,
+                port: None,
+                password: None,
+                sni: None,
+                skip_cert_verify: false,
                 provider: None,
                 subscription: None,
             }],
@@ -1106,6 +1224,101 @@ mod tests {
             Error::unsupported(
                 "listener 'mixed' uses mixed protocol mode, which is not supported in the config foundation stage",
             )
+        );
+    }
+
+    #[test]
+    fn resolves_listener_target_through_nested_groups_to_a_node() {
+        let active = ActiveConfig::from_external(ExternalConfig {
+            listeners: vec![ListenerInput {
+                name: "local-socks".to_string(),
+                bind: "127.0.0.1:1080".to_string(),
+                protocol: ListenerProtocolInput::Socks5,
+                target: TargetRefInput::group("entry"),
+            }],
+            nodes: vec![
+                NodeInput {
+                    name: "node-a".to_string(),
+                    kind: crate::config::external::NodeKindInput::DirectTcp,
+                    address: None,
+                    server: None,
+                    port: None,
+                    password: None,
+                    sni: None,
+                    skip_cert_verify: false,
+                    provider: None,
+                    subscription: None,
+                },
+                NodeInput {
+                    name: "node-b".to_string(),
+                    kind: crate::config::external::NodeKindInput::DirectTcp,
+                    address: None,
+                    server: None,
+                    port: None,
+                    password: None,
+                    sni: None,
+                    skip_cert_verify: false,
+                    provider: None,
+                    subscription: None,
+                },
+            ],
+            groups: vec![
+                GroupInput {
+                    name: "entry".to_string(),
+                    strategy: GroupStrategyInput::Select,
+                    members: vec![
+                        TargetRefInput::group("fallback"),
+                        TargetRefInput::node("node-b"),
+                    ],
+                    provider: None,
+                    subscription: None,
+                },
+                GroupInput {
+                    name: "fallback".to_string(),
+                    strategy: GroupStrategyInput::Fallback,
+                    members: vec![TargetRefInput::node("node-a")],
+                    provider: None,
+                    subscription: None,
+                },
+            ],
+            ..ExternalConfig::default()
+        })
+        .expect("target graph should normalize");
+
+        let resolved = active
+            .resolve_target_node(&active.listeners()[0].target)
+            .expect("group target should resolve to a node");
+
+        assert_eq!(resolved.name, "node-a");
+        assert_eq!(resolved.kind, NodeKind::DirectTcp);
+    }
+
+    #[test]
+    fn rejects_group_cycles_during_validation() {
+        let config = ExternalConfig {
+            groups: vec![
+                GroupInput {
+                    name: "entry".to_string(),
+                    strategy: GroupStrategyInput::Select,
+                    members: vec![TargetRefInput::group("fallback")],
+                    provider: None,
+                    subscription: None,
+                },
+                GroupInput {
+                    name: "fallback".to_string(),
+                    strategy: GroupStrategyInput::Fallback,
+                    members: vec![TargetRefInput::group("entry")],
+                    provider: None,
+                    subscription: None,
+                },
+            ],
+            ..ExternalConfig::default()
+        };
+
+        let error = ActiveConfig::from_external(config).expect_err("group cycle must fail");
+        assert_eq!(
+            error,
+            Error::validation("group resolution cycle detected: entry -> fallback -> entry")
         );
     }
 }

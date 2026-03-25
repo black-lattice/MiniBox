@@ -54,9 +54,7 @@ mod tests {
     #[test]
     fn encodes_no_auth_selection() {
         assert_eq!(
-            encode_method_selection(MethodSelection {
-                method: AuthMethod::NoAuth,
-            }),
+            encode_method_selection(MethodSelection { method: AuthMethod::NoAuth }),
             [0x05, 0x00]
         );
     }

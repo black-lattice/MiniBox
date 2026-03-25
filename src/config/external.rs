@@ -14,6 +14,13 @@ pub enum GroupStrategyInput {
     UrlTest,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum NodeKindInput {
+    #[default]
+    DirectTcp,
+    Trojan,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TargetRefInput {
     Node(String),
@@ -47,7 +54,20 @@ pub struct ListenerInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeInput {
     pub name: String,
-    pub address: String,
+    #[serde(default)]
+    pub kind: NodeKindInput,
+    #[serde(default)]
+    pub address: Option<String>,
+    #[serde(default)]
+    pub server: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub sni: Option<String>,
+    #[serde(default)]
+    pub skip_cert_verify: bool,
     pub provider: Option<String>,
     pub subscription: Option<String>,
 }
@@ -106,9 +126,6 @@ pub struct ExternalDocument {
 
 impl ExternalDocument {
     pub fn new(source: ExternalConfigSource, raw: impl Into<String>) -> Self {
-        Self {
-            source,
-            raw: raw.into(),
-        }
+        Self { source, raw: raw.into() }
     }
 }

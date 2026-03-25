@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod admin;
 pub mod bootstrap;
 pub mod config;
 pub mod error;

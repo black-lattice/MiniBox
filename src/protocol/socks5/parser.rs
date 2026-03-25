@@ -5,33 +5,26 @@ use crate::protocol::socks5::types::{AuthMethod, Command, Greeting, Request, VER
 use crate::session::{TargetAddr, TargetEndpoint};
 
 pub fn parse_greeting(input: &[u8]) -> Result<(Greeting, usize), Socks5Error> {
-    let header = input.get(..2).ok_or(Socks5Error::Truncated {
-        expected: 2,
-        actual: input.len(),
-    })?;
+    let header =
+        input.get(..2).ok_or(Socks5Error::Truncated { expected: 2, actual: input.len() })?;
 
     ensure_version(header[0])?;
 
     let methods_len = header[1] as usize;
     let frame_len = 2 + methods_len;
-    let methods = input.get(2..frame_len).ok_or(Socks5Error::Truncated {
-        expected: frame_len,
-        actual: input.len(),
-    })?;
+    let methods = input
+        .get(2..frame_len)
+        .ok_or(Socks5Error::Truncated { expected: frame_len, actual: input.len() })?;
 
     Ok((
-        Greeting {
-            methods: methods.iter().copied().map(AuthMethod::from_byte).collect(),
-        },
+        Greeting { methods: methods.iter().copied().map(AuthMethod::from_byte).collect() },
         frame_len,
     ))
 }
 
 pub fn parse_request(input: &[u8]) -> Result<(Request, usize), Socks5Error> {
-    let header = input.get(..4).ok_or(Socks5Error::Truncated {
-        expected: 4,
-        actual: input.len(),
-    })?;
+    let header =
+        input.get(..4).ok_or(Socks5Error::Truncated { expected: 4, actual: input.len() })?;
 
     ensure_version(header[0])?;
 
@@ -46,60 +39,41 @@ pub fn parse_request(input: &[u8]) -> Result<(Request, usize), Socks5Error> {
 
     let (destination, consumed) = parse_target_endpoint(&input[3..])?;
 
-    Ok((
-        Request {
-            command,
-            destination,
-        },
-        3 + consumed,
-    ))
+    Ok((Request { command, destination }, 3 + consumed))
 }
 
 pub fn parse_target_endpoint(input: &[u8]) -> Result<(TargetEndpoint, usize), Socks5Error> {
-    let address_type = input.first().copied().ok_or(Socks5Error::Truncated {
-        expected: 1,
-        actual: input.len(),
-    })?;
+    let address_type = input
+        .first()
+        .copied()
+        .ok_or(Socks5Error::Truncated { expected: 1, actual: input.len() })?;
 
     match address_type {
         0x01 => {
-            let payload = input.get(1..7).ok_or(Socks5Error::Truncated {
-                expected: 7,
-                actual: input.len(),
-            })?;
+            let payload = input
+                .get(1..7)
+                .ok_or(Socks5Error::Truncated { expected: 7, actual: input.len() })?;
             let address = Ipv4Addr::new(payload[0], payload[1], payload[2], payload[3]);
             let port = u16::from_be_bytes([payload[4], payload[5]]);
 
-            Ok((
-                TargetEndpoint {
-                    address: TargetAddr::Ipv4(address),
-                    port,
-                },
-                7,
-            ))
+            Ok((TargetEndpoint { address: TargetAddr::Ipv4(address), port }, 7))
         }
         0x03 => {
-            let domain_len = *input.get(1).ok_or(Socks5Error::Truncated {
-                expected: 2,
-                actual: input.len(),
-            })? as usize;
+            let domain_len =
+                *input.get(1).ok_or(Socks5Error::Truncated { expected: 2, actual: input.len() })?
+                    as usize;
 
             if domain_len == 0 {
                 return Err(Socks5Error::InvalidDomainLength);
             }
 
             let frame_len = 1 + 1 + domain_len + 2;
-            let domain = input.get(2..2 + domain_len).ok_or(Socks5Error::Truncated {
-                expected: frame_len,
-                actual: input.len(),
-            })?;
-            let port_bytes =
-                input
-                    .get(2 + domain_len..frame_len)
-                    .ok_or(Socks5Error::Truncated {
-                        expected: frame_len,
-                        actual: input.len(),
-                    })?;
+            let domain = input
+                .get(2..2 + domain_len)
+                .ok_or(Socks5Error::Truncated { expected: frame_len, actual: input.len() })?;
+            let port_bytes = input
+                .get(2 + domain_len..frame_len)
+                .ok_or(Socks5Error::Truncated { expected: frame_len, actual: input.len() })?;
             let domain = std::str::from_utf8(domain).map_err(|_| Socks5Error::InvalidDomainName)?;
             if domain.is_empty() {
                 return Err(Socks5Error::InvalidDomainName);
@@ -114,10 +88,9 @@ pub fn parse_target_endpoint(input: &[u8]) -> Result<(TargetEndpoint, usize), So
             ))
         }
         0x04 => {
-            let payload = input.get(1..19).ok_or(Socks5Error::Truncated {
-                expected: 19,
-                actual: input.len(),
-            })?;
+            let payload = input
+                .get(1..19)
+                .ok_or(Socks5Error::Truncated { expected: 19, actual: input.len() })?;
             let address = Ipv6Addr::from([
                 payload[0],
                 payload[1],
@@ -138,24 +111,14 @@ pub fn parse_target_endpoint(input: &[u8]) -> Result<(TargetEndpoint, usize), So
             ]);
             let port = u16::from_be_bytes([payload[16], payload[17]]);
 
-            Ok((
-                TargetEndpoint {
-                    address: TargetAddr::Ipv6(address),
-                    port,
-                },
-                19,
-            ))
+            Ok((TargetEndpoint { address: TargetAddr::Ipv6(address), port }, 19))
         }
         other => Err(Socks5Error::UnsupportedAddressType(other)),
     }
 }
 
 fn ensure_version(version: u8) -> Result<(), Socks5Error> {
-    if version == VERSION {
-        Ok(())
-    } else {
-        Err(Socks5Error::InvalidVersion(version))
-    }
+    if version == VERSION { Ok(()) } else { Err(Socks5Error::InvalidVersion(version)) }
 }
 
 #[cfg(test)]
@@ -175,9 +138,7 @@ mod tests {
 
         assert_eq!(
             greeting,
-            Greeting {
-                methods: vec![AuthMethod::NoAuth, AuthMethod::UsernamePassword]
-            }
+            Greeting { methods: vec![AuthMethod::NoAuth, AuthMethod::UsernamePassword] }
         );
         assert!(greeting.supports_no_auth());
         assert_eq!(consumed, 4);
@@ -213,19 +174,14 @@ mod tests {
 
         assert_eq!(
             endpoint,
-            TargetEndpoint {
-                address: TargetAddr::Domain("example.com".to_string()),
-                port: 80,
-            }
+            TargetEndpoint { address: TargetAddr::Domain("example.com".to_string()), port: 80 }
         );
         assert_eq!(consumed, input.len());
     }
 
     #[test]
     fn parses_ipv6_target() {
-        let input = [
-            0x04, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xbb,
-        ];
+        let input = [0x04, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xbb];
 
         let (endpoint, consumed) = parse_target_endpoint(&input).expect("ipv6 should parse");
 
@@ -252,12 +208,6 @@ mod tests {
     fn rejects_truncated_target() {
         let error = parse_target_endpoint(&[0x01, 127, 0]).expect_err("target is truncated");
 
-        assert_eq!(
-            error,
-            Socks5Error::Truncated {
-                expected: 7,
-                actual: 3,
-            }
-        );
+        assert_eq!(error, Socks5Error::Truncated { expected: 7, actual: 3 });
     }
 }

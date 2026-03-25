@@ -39,8 +39,7 @@ impl AdmissionControl {
     }
 
     pub fn remaining_capacity(&self) -> usize {
-        self.max_connections()
-            .saturating_sub(self.active_connections())
+        self.max_connections().saturating_sub(self.active_connections())
     }
 
     pub fn can_accept(&self) -> bool {
@@ -64,9 +63,7 @@ impl AdmissionControl {
                 Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    return Ok(AdmissionGuard {
-                        inner: Arc::clone(&self.inner),
-                    });
+                    return Ok(AdmissionGuard { inner: Arc::clone(&self.inner) });
                 }
                 Err(current) => observed = current,
             }

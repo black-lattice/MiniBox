@@ -13,7 +13,7 @@ pub struct ClashLevelBAdapter;
 
 impl ClashLevelBAdapter {
     pub fn supported_scope(&self) -> &'static str {
-        "nodes + groups"
+        "subscription parsing and boundary validation; executable imported outbound nodes are still pending"
     }
 
     pub fn parse(&self, document: &ExternalDocument) -> Result<ClashSubscription, Error> {
@@ -36,11 +36,30 @@ mod tests {
     use super::ClashLevelBAdapter;
     use crate::config::external::ExternalConfigSource;
     use crate::config::external::ExternalDocument;
-    use crate::config::internal::{ConfigOrigin, GroupStrategy, TargetRef};
+    use crate::config::internal::NodeKind;
     use crate::error::Error;
 
     #[test]
-    fn translates_supported_proxies_and_groups_into_active_config() {
+    fn translates_empty_subscription_into_metadata_only() {
+        let adapter = ClashLevelBAdapter;
+        let document = ExternalDocument::new(
+            ExternalConfigSource::ClashSubscription {
+                url: "https://example.com/subscription".to_string(),
+            },
+            "# translation scaffolding only in this stage\n",
+        );
+
+        let active = adapter
+            .translate(&document)
+            .expect("empty Clash document should still produce subscription metadata");
+
+        assert!(active.nodes().is_empty());
+        assert!(active.groups().is_empty());
+        assert_eq!(active.subscriptions().len(), 1);
+    }
+
+    #[test]
+    fn rejects_proxy_nodes_until_runtime_supports_outbound_protocols() {
         let adapter = ClashLevelBAdapter;
         let document = ExternalDocument::new(
             ExternalConfigSource::ClashSubscription {
@@ -52,47 +71,52 @@ proxies:
     type: ss
     server: 1.1.1.1
     port: 443
-  - name: edge-b
+"#,
+        );
+
+        let error = adapter.translate(&document).expect_err(
+            "runtime should reject imported proxy nodes until outbound execution exists",
+        );
+
+        assert_eq!(
+            error,
+            Error::unimplemented(
+                "Clash proxy 'edge-a' uses type 'ss', but MiniBox does not yet execute imported outbound proxy node protocols",
+            )
+        );
+    }
+
+    #[test]
+    fn translates_trojan_proxy_nodes_into_internal_config() {
+        let adapter = ClashLevelBAdapter;
+        let document = ExternalDocument::new(
+            ExternalConfigSource::ClashSubscription {
+                url: "https://example.com/subscription".to_string(),
+            },
+            r#"
+proxies:
+  - name: edge-a
     type: trojan
     server: edge.example.com
-    port: 8443
-proxy-groups:
-  - name: auto
-    type: fallback
-    proxies:
-      - edge-b
-  - name: primary
-    type: select
-    proxies:
-      - edge-a
-      - auto
+    port: 443
+    password: secret
+    sni: edge.example.com
+    skip-cert-verify: true
 "#,
         );
 
         let active = adapter
             .translate(&document)
-            .expect("supported Clash document should translate");
+            .expect("Trojan proxy should translate into internal config");
 
-        assert_eq!(active.nodes().len(), 2);
-        assert_eq!(active.groups().len(), 2);
-        assert_eq!(active.nodes()[0].name, "edge-a");
-        assert_eq!(active.nodes()[0].address, "1.1.1.1:443");
-        assert_eq!(
-            active.nodes()[0].origin,
-            ConfigOrigin::Subscription {
-                subscription: "clash-subscription".to_string(),
-            }
-        );
-        assert_eq!(active.groups()[0].name, "auto");
-        assert_eq!(active.groups()[0].strategy, GroupStrategy::Fallback);
-        assert_eq!(
-            active.groups()[1].members,
-            vec![
-                TargetRef::Node("edge-a".to_string()),
-                TargetRef::Group("auto".to_string()),
-            ]
-        );
-        assert_eq!(active.subscriptions().len(), 1);
+        assert_eq!(active.nodes().len(), 1);
+        assert_eq!(active.nodes()[0].kind, NodeKind::Trojan);
+        let trojan = active.nodes()[0].trojan.as_ref().expect("Trojan settings should be present");
+        assert_eq!(trojan.server, "edge.example.com");
+        assert_eq!(trojan.port, 443);
+        assert_eq!(trojan.password, "secret");
+        assert_eq!(trojan.sni.as_deref(), Some("edge.example.com"));
+        assert!(trojan.skip_cert_verify);
     }
 
     #[test]
@@ -103,19 +127,13 @@ proxy-groups:
                 url: "https://example.com/subscription".to_string(),
             },
             r#"
-proxies:
-  - name: edge-a
-    type: ss
-    server: 1.1.1.1
-    port: 443
 rules:
   - MATCH,DIRECT
 "#,
         );
 
-        let error = adapter
-            .translate(&document)
-            .expect_err("rule-level semantics must fail closed");
+        let error =
+            adapter.translate(&document).expect_err("rule-level semantics must fail closed");
 
         assert_eq!(
             error,

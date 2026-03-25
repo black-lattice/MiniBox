@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use crate::config::internal::TargetRef;
+use crate::config::internal::{NodeConfig, TargetRef};
 use crate::listener::{ListenerHandler, ListenerPlan};
 use crate::session::TargetEndpoint;
 
@@ -24,6 +24,7 @@ pub struct SessionContext {
     pub listener_name: String,
     pub protocol: SessionProtocol,
     pub listener_target: TargetRef,
+    pub listener_target_node: NodeConfig,
     pub downstream_peer: SocketAddr,
     pub downstream_local: SocketAddr,
 }
@@ -38,6 +39,7 @@ impl SessionContext {
             listener_name: plan.name.clone(),
             protocol: SessionProtocol::from(plan.handler),
             listener_target: plan.target.clone(),
+            listener_target_node: plan.resolved_target.clone(),
             downstream_peer,
             downstream_local,
         }

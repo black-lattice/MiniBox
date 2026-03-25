@@ -1,4 +1,4 @@
-use crate::config::internal::{ListenerConfig, ProtocolKind, TargetRef};
+use crate::config::internal::{ActiveConfig, NodeConfig, ProtocolKind, TargetRef};
 use crate::listener::AdmissionSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,25 +27,29 @@ pub struct ListenerPlan {
     pub bind: String,
     pub protocol: ProtocolKind,
     pub target: TargetRef,
+    pub resolved_target: NodeConfig,
     pub handler: ListenerHandler,
     pub admission: ListenerAdmissionPlan,
 }
 
 pub fn derive_listener_plans(
-    listeners: &[ListenerConfig],
+    active_config: &ActiveConfig,
     admission: AdmissionSnapshot,
 ) -> Vec<ListenerPlan> {
-    listeners
+    active_config
+        .listeners()
         .iter()
         .map(|listener| ListenerPlan {
             name: listener.name.clone(),
             bind: listener.bind.clone(),
             protocol: listener.protocol,
             target: listener.target.clone(),
+            resolved_target: active_config
+                .resolve_target_node(&listener.target)
+                .expect("active config should resolve listener target during plan derivation")
+                .clone(),
             handler: ListenerHandler::from(listener.protocol),
-            admission: ListenerAdmissionPlan {
-                shared_limit: admission.max_connections,
-            },
+            admission: ListenerAdmissionPlan { shared_limit: admission.max_connections },
         })
         .collect()
 }

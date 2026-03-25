@@ -16,6 +16,9 @@ pub struct ClashProxy {
     pub kind: String,
     pub server: Option<String>,
     pub port: Option<u16>,
+    pub password: Option<String>,
+    pub sni: Option<String>,
+    pub skip_cert_verify: bool,
 }
 
 #[derive(Debug, Clone, Default)]

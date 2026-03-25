@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::config::external::{
-    ExternalConfig, ExternalConfigSource, GroupInput, GroupStrategyInput, NodeInput,
+    ExternalConfig, ExternalConfigSource, GroupInput, GroupStrategyInput, NodeInput, NodeKindInput,
     SubscriptionInput, TargetRefInput,
 };
 use crate::error::Error;
@@ -21,20 +21,13 @@ pub fn translate_document(
     let node_names = collect_names("proxy", &nodes, |node| node.name.as_str())?;
     let group_names = collect_names("group", &document.proxy_groups, |group| group.name.trim())?;
     ensure_disjoint_names(&node_names, &group_names)?;
-    let groups = translate_groups(
-        &document.proxy_groups,
-        &node_names,
-        &group_names,
-        &subscription_name,
-    )?;
+    let groups =
+        translate_groups(&document.proxy_groups, &node_names, &group_names, &subscription_name)?;
 
     Ok(ExternalConfig {
         nodes,
         groups,
-        subscriptions: vec![SubscriptionInput {
-            name: subscription_name,
-            source: source.clone(),
-        }],
+        subscriptions: vec![SubscriptionInput { name: subscription_name, source: source.clone() }],
         ..ExternalConfig::default()
     })
 }
@@ -77,10 +70,7 @@ fn translate_nodes(
     for proxy in proxies {
         let name = normalize_name("proxy", proxy.name.as_str())?;
         if !seen.insert(name.clone()) {
-            return Err(Error::validation(format!(
-                "duplicate proxy name '{}'",
-                name
-            )));
+            return Err(Error::validation(format!("duplicate proxy name '{}'", name)));
         }
 
         let kind = normalize_name("proxy type", proxy.kind.as_str())?;
@@ -92,11 +82,7 @@ fn translate_nodes(
             )));
         }
 
-        let server = proxy
-            .server
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
+        let server = proxy.server.as_deref().map(str::trim).filter(|value| !value.is_empty());
         let Some(server) = server else {
             return Err(Error::unsupported(format!(
                 "proxy '{}' of type '{}' cannot be translated without both server and port",
@@ -110,12 +96,39 @@ fn translate_nodes(
             )));
         };
 
-        nodes.push(NodeInput {
-            name,
-            address: format!("{server}:{port}"),
-            provider: None,
-            subscription: Some(subscription_name.to_string()),
-        });
+        match lower_kind.as_str() {
+            "trojan" => {
+                let password = proxy
+                    .password
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        Error::unsupported(format!(
+                            "proxy '{}' of type '{}' cannot be translated without password",
+                            name, kind
+                        ))
+                    })?;
+                nodes.push(NodeInput {
+                    name,
+                    kind: NodeKindInput::Trojan,
+                    address: None,
+                    server: Some(server.to_string()),
+                    port: Some(port),
+                    password: Some(password.to_string()),
+                    sni: proxy.sni.clone(),
+                    skip_cert_verify: proxy.skip_cert_verify,
+                    provider: None,
+                    subscription: Some(subscription_name.to_string()),
+                });
+            }
+            _ => {
+                return Err(Error::unimplemented(format!(
+                    "Clash proxy '{}' uses type '{}', but MiniBox does not yet execute imported outbound proxy node protocols",
+                    name, kind
+                )));
+            }
+        }
     }
 
     Ok(nodes)
@@ -215,10 +228,7 @@ fn collect_names<T>(
     for item in items {
         let name = normalize_name(kind, selector(item))?;
         if !names.insert(name.clone()) {
-            return Err(Error::validation(format!(
-                "duplicate {kind} name '{}'",
-                name
-            )));
+            return Err(Error::validation(format!("duplicate {kind} name '{}'", name)));
         }
     }
 

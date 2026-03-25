@@ -51,7 +51,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::accept_downstream;
-    use crate::config::internal::TargetRef;
+    use crate::config::internal::{ConfigOrigin, NodeConfig, NodeKind, TargetRef};
     use crate::session::{SessionContext, SessionProtocol, TargetAddr};
 
     #[tokio::test]
@@ -61,6 +61,7 @@ mod tests {
             listener_name: "local-socks".to_string(),
             protocol: SessionProtocol::Socks5,
             listener_target: TargetRef::Node("node-a".to_string()),
+            listener_target_node: test_listener_node(),
             downstream_peer: SocketAddr::from((Ipv4Addr::LOCALHOST, 40000)),
             downstream_local: SocketAddr::from((Ipv4Addr::LOCALHOST, 1080)),
         };
@@ -68,16 +69,10 @@ mod tests {
         let server_task =
             tokio::spawn(async move { accept_downstream(&mut server, &context).await });
 
-        client
-            .write_all(&[0x05, 0x01, 0x00])
-            .await
-            .expect("write greeting");
+        client.write_all(&[0x05, 0x01, 0x00]).await.expect("write greeting");
 
         let mut selection = [0u8; 2];
-        client
-            .read_exact(&mut selection)
-            .await
-            .expect("read no-auth selection");
+        client.read_exact(&mut selection).await.expect("read no-auth selection");
         assert_eq!(selection, [0x05, 0x00]);
 
         client
@@ -94,14 +89,8 @@ mod tests {
             .expect("session should parse downstream request");
 
         assert_eq!(request.context.listener_name, "local-socks");
-        assert_eq!(
-            request.context.listener_target,
-            TargetRef::Node("node-a".to_string())
-        );
-        assert_eq!(
-            request.requested_target.address,
-            TargetAddr::Domain("example.com".to_string())
-        );
+        assert_eq!(request.context.listener_target, TargetRef::Node("node-a".to_string()));
+        assert_eq!(request.requested_target.address, TargetAddr::Domain("example.com".to_string()));
         assert_eq!(request.requested_target.port, 443);
     }
 
@@ -112,6 +101,7 @@ mod tests {
             listener_name: "local-connect".to_string(),
             protocol: SessionProtocol::HttpConnect,
             listener_target: TargetRef::Node("node-a".to_string()),
+            listener_target_node: test_listener_node(),
             downstream_peer: SocketAddr::from((Ipv4Addr::LOCALHOST, 40001)),
             downstream_local: SocketAddr::from((Ipv4Addr::LOCALHOST, 8080)),
         };
@@ -130,10 +120,16 @@ mod tests {
             .expect("session should parse downstream request");
 
         assert_eq!(request.context.listener_name, "local-connect");
-        assert_eq!(
-            request.requested_target.address,
-            TargetAddr::Domain("example.com".to_string())
-        );
+        assert_eq!(request.requested_target.address, TargetAddr::Domain("example.com".to_string()));
         assert_eq!(request.requested_target.port, 443);
+    }
+
+    fn test_listener_node() -> NodeConfig {
+        NodeConfig {
+            name: "node-a".to_string(),
+            kind: NodeKind::DirectTcp,
+            trojan: None,
+            origin: ConfigOrigin::Inline,
+        }
     }
 }

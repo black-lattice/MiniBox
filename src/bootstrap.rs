@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::time::Duration;
 
+use crate::admin::{AdminTaskHandle, spawn_admin_server};
 use crate::operations::OperationsPlan;
 use crate::provider::cache::CacheStore;
 use crate::subscription::{
@@ -14,8 +15,12 @@ use crate::{
     error::Error,
     health::ProbeStatus,
     listener::ListenerTaskHandle,
-    logging::emit_log_event,
+    logging::{emit_log_event_by_name, install_logging_plan},
     runtime::RuntimeState,
+};
+use crate::{
+    config::internal::{ConfigOrigin, NodeKind, TargetRef},
+    subscription::ConfigActivationSource,
 };
 
 const LISTENER_TASK_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -31,10 +36,12 @@ pub struct StartupPlan {
 
 pub fn build_startup_plan() -> StartupPlan {
     StartupPlan {
-        current_phase: "listener accept-loop + direct CONNECT proxy baseline",
+        current_phase: "subscription source + local listener template bootstrap",
         clash_support_boundary: "level B: nodes + groups, without full rule compatibility",
         steps: &[
             "validate internal config snapshot",
+            "load subscription or local file source",
+            "merge startup listener template with translated subscription content when needed",
             "prepare listener registry and shared admission control",
             "bind configured listeners and accept downstream TCP sessions",
             "parse SOCKS5 and HTTP CONNECT requests into session targets",
@@ -61,10 +68,7 @@ pub struct StartupOptions {
 
 impl StartupOptions {
     pub fn from_source(source: ExternalConfigSource) -> Self {
-        Self {
-            cache_path: default_cache_path(&source),
-            source,
-        }
+        Self { cache_path: default_cache_path(&source), source }
     }
 }
 
@@ -113,11 +117,7 @@ pub async fn prepare_runtime(options: &StartupOptions) -> Result<StartupRuntime,
         )));
     }
 
-    Ok(StartupRuntime {
-        plan: build_startup_plan(),
-        activation,
-        runtime,
-    })
+    Ok(StartupRuntime { plan: build_startup_plan(), activation, runtime })
 }
 
 pub async fn run(options: StartupOptions) -> Result<(), Error> {
@@ -128,41 +128,78 @@ async fn run_until<F>(options: StartupOptions, shutdown_signal: F) -> Result<(),
 where
     F: std::future::Future<Output = Result<(), Error>>,
 {
-    let startup = prepare_runtime(&options).await?;
-    emit_startup_logs(&startup, &options);
-
-    let mut handles = match startup.spawn_accept_loops().await {
-        Ok(handles) => handles,
+    install_logging_plan(build_startup_plan().operations.logging.clone());
+    let startup = match prepare_runtime(&options).await {
+        Ok(startup) => startup,
         Err(error) => {
-            emit_runtime_readiness_changed(
+            emit_fatal_startup_failure("prepare_runtime", &options.source, &error);
+            return Err(error);
+        }
+    };
+    emit_startup_logs(&startup, &options);
+    update_runtime_readiness(
+        &startup.runtime,
+        &startup.plan.operations,
+        ProbeStatus::Starting,
+        "startup accepted; listeners not yet bound".to_string(),
+    );
+    let mut admin_handle = match spawn_admin_server(startup.runtime.clone()).await {
+        Ok(handle) => handle,
+        Err(error) => {
+            emit_fatal_startup_failure("spawn_admin_server", &options.source, &error);
+            update_runtime_readiness(
+                &startup.runtime,
                 &startup.plan.operations,
                 ProbeStatus::Degraded,
-                format!("listener startup failed: {error}"),
+                format!("admin listener startup failed: {error}"),
             );
             return Err(error);
         }
     };
+    emit_admin_bound(&startup.plan.operations, admin_handle.as_ref());
+
+    let mut handles = match startup.spawn_accept_loops().await {
+        Ok(handles) => handles,
+        Err(error) => {
+            emit_fatal_startup_failure("spawn_accept_loops", &options.source, &error);
+            update_runtime_readiness(
+                &startup.runtime,
+                &startup.plan.operations,
+                ProbeStatus::Degraded,
+                format!("listener startup failed: {error}"),
+            );
+            shutdown_admin_task(&mut admin_handle).await?;
+            return Err(error);
+        }
+    };
+    emit_startup_activated(&startup, &options, admin_handle.as_ref(), &handles);
     for handle in &handles {
-        emit_listener_bound(&startup.plan.operations, handle);
+        emit_listener_bound(handle);
     }
-    emit_runtime_readiness_changed(
+    update_runtime_readiness(
+        &startup.runtime,
         &startup.plan.operations,
         ProbeStatus::Ready,
         format!("{} listener(s) bound", handles.len()),
     );
 
-    match wait_for_runtime_stop(&startup.plan.operations, &mut handles, shutdown_signal).await {
+    match wait_for_runtime_stop(&options.source, &mut handles, shutdown_signal).await {
         Ok(shutdown_reason) => {
-            emit_runtime_readiness_changed(
+            update_runtime_readiness(
+                &startup.runtime,
                 &startup.plan.operations,
                 ProbeStatus::Degraded,
                 shutdown_reason,
             );
-            shutdown_listener_tasks(&mut handles).await
+            shutdown_listener_tasks(&mut handles).await?;
+            shutdown_admin_task(&mut admin_handle).await
         }
         Err(error) => {
+            emit_runtime_failure("listener_failure", &options.source, &error);
             let shutdown_result = shutdown_listener_tasks(&mut handles).await;
+            let admin_shutdown = shutdown_admin_task(&mut admin_handle).await;
             shutdown_result?;
+            admin_shutdown?;
             Err(error)
         }
     }
@@ -170,13 +207,9 @@ where
 
 pub fn startup_source_from_arg(value: &str) -> ExternalConfigSource {
     if value.starts_with("http://") || value.starts_with("https://") {
-        ExternalConfigSource::ClashSubscription {
-            url: value.to_string(),
-        }
+        ExternalConfigSource::ClashSubscription { url: value.to_string() }
     } else {
-        ExternalConfigSource::LocalFile {
-            path: value.to_string(),
-        }
+        ExternalConfigSource::LocalFile { path: value.to_string() }
     }
 }
 
@@ -196,92 +229,149 @@ fn sanitize_source_label(raw: &str) -> String {
     for ch in raw.chars() {
         if ch.is_ascii_alphanumeric() {
             label.push(ch.to_ascii_lowercase());
-        } else if label.chars().last() != Some('-') {
+        } else if !label.ends_with('-') {
             label.push('-');
         }
     }
     let trimmed = label.trim_matches('-');
-    if trimmed.is_empty() {
-        "subscription".to_string()
-    } else {
-        trimmed.to_string()
-    }
+    if trimmed.is_empty() { "subscription".to_string() } else { trimmed.to_string() }
 }
 
 fn emit_startup_logs(startup: &StartupRuntime, options: &StartupOptions) {
-    let operations = &startup.plan.operations;
-    if let Some(event) = operations.logging.event("startup.begin") {
-        emit_log_event(
-            event,
-            &[
-                ("phase", startup.plan.current_phase.to_string()),
-                ("config_source", describe_source(&options.source)),
-            ],
-        );
-    }
+    let _ = emit_log_event_by_name(
+        "startup.begin",
+        &[
+            ("phase", startup.plan.current_phase.to_string()),
+            ("config_source", describe_source(&options.source)),
+        ],
+    );
 
     if let Some(error) = &startup.activation.translation_error {
-        if let Some(event) = operations.logging.event("subscription.translate_failed") {
-            emit_log_event(
-                event,
-                &[
-                    ("source", describe_source(&options.source)),
-                    ("reason", error.to_string()),
-                ],
-            );
-        }
+        let _ = emit_log_event_by_name(
+            "subscription.translate_failed",
+            &[("source", describe_source(&options.source)), ("reason", error.to_string())],
+        );
     }
 
     if startup.activation.source == crate::subscription::ConfigActivationSource::LastKnownGoodCache
     {
-        if let Some(event) = operations.logging.event("provider.cache_rollback_used") {
-            emit_log_event(
-                event,
-                &[
-                    ("provider", "startup-cache".to_string()),
-                    (
-                        "reason",
-                        startup
-                            .activation
-                            .translation_error
-                            .as_ref()
-                            .map(ToString::to_string)
-                            .unwrap_or_else(|| "translation fallback requested".to_string()),
-                    ),
-                ],
-            );
-        }
-    }
-}
-
-fn emit_listener_bound(operations: &OperationsPlan, handle: &ListenerTaskHandle) {
-    if let Some(event) = operations.logging.event("listener.bound") {
-        emit_log_event(
-            event,
+        let _ = emit_log_event_by_name(
+            "provider.cache_rollback_used",
             &[
-                ("listener", handle.plan().name.clone()),
-                ("protocol", format!("{:?}", handle.plan().protocol)),
-                ("bind", handle.local_addr().to_string()),
+                ("provider", "startup-cache".to_string()),
+                (
+                    "reason",
+                    startup
+                        .activation
+                        .translation_error
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "translation fallback requested".to_string()),
+                ),
             ],
         );
     }
 }
 
-fn emit_runtime_readiness_changed(
-    operations: &OperationsPlan,
+fn emit_startup_activated(
+    startup: &StartupRuntime,
+    options: &StartupOptions,
+    admin_handle: Option<&AdminTaskHandle>,
+    handles: &[ListenerTaskHandle],
+) {
+    let _ = emit_log_event_by_name(
+        "startup.activated",
+        &[
+            ("source", describe_source(&options.source)),
+            ("activated", describe_activation_source(startup.activation.source).to_string()),
+            (
+                "cache_rollback",
+                if startup.activation.source == ConfigActivationSource::LastKnownGoodCache {
+                    "used".to_string()
+                } else {
+                    "not-used".to_string()
+                },
+            ),
+            ("listeners", handles.len().to_string()),
+            ("admin_enabled", admin_handle.is_some().to_string()),
+            (
+                "admin_bind",
+                admin_handle
+                    .map(|admin| admin.local_addr().to_string())
+                    .unwrap_or_else(|| "disabled".to_string()),
+            ),
+        ],
+    );
+}
+
+fn emit_admin_bound(operations: &OperationsPlan, admin_handle: Option<&AdminTaskHandle>) {
+    let Some(admin) = admin_handle else {
+        return;
+    };
+    let _ = emit_log_event_by_name(
+        "admin.bound",
+        &[
+            ("bind", admin.local_addr().to_string()),
+            ("healthz", operations.health.liveness.path.to_string()),
+            ("readyz", operations.health.readiness.path.to_string()),
+            ("metrics", operations.metrics.exposition_path.to_string()),
+        ],
+    );
+}
+
+fn emit_fatal_startup_failure(phase: &str, source: &ExternalConfigSource, error: &Error) {
+    let _ = emit_log_event_by_name(
+        "startup.failed",
+        &[
+            ("phase", phase.to_string()),
+            ("source", describe_source(source)),
+            ("reason", error.to_string()),
+        ],
+    );
+}
+
+fn emit_runtime_failure(phase: &str, source: &ExternalConfigSource, error: &Error) {
+    let _ = emit_log_event_by_name(
+        "runtime.failed",
+        &[
+            ("phase", phase.to_string()),
+            ("source", describe_source(source)),
+            ("reason", error.to_string()),
+        ],
+    );
+}
+
+fn emit_listener_bound(handle: &ListenerTaskHandle) {
+    let _ = emit_log_event_by_name(
+        "listener.bound",
+        &[
+            ("listener", handle.plan().name.clone()),
+            ("protocol", format!("{:?}", handle.plan().protocol)),
+            ("bind", handle.local_addr().to_string()),
+            ("target", describe_listener_target(handle.plan())),
+        ],
+    );
+}
+
+fn emit_runtime_readiness_changed(status: ProbeStatus, reason: String) {
+    let _ = emit_log_event_by_name(
+        "runtime.readiness_changed",
+        &[("status", status.as_str().to_string()), ("reason", reason)],
+    );
+}
+
+fn update_runtime_readiness(
+    runtime: &RuntimeState,
+    _operations: &OperationsPlan,
     status: ProbeStatus,
     reason: String,
 ) {
-    if let Some(event) = operations.logging.event("runtime.readiness_changed") {
-        emit_log_event(
-            event,
-            &[("status", status.as_str().to_string()), ("reason", reason)],
-        );
-    }
+    runtime.update_readiness(status, reason.clone());
+    emit_runtime_readiness_changed(status, reason);
 }
 
 async fn wait_for_runtime_stop<F>(
-    operations: &OperationsPlan,
+    source: &ExternalConfigSource,
     handles: &mut Vec<ListenerTaskHandle>,
     shutdown_signal: F,
 ) -> Result<String, Error>
@@ -322,10 +412,10 @@ where
                         )),
                     };
                     emit_runtime_readiness_changed(
-                        operations,
                         ProbeStatus::Degraded,
                         format!("listener '{}' failed: {failure}", listener_name),
                     );
+                    emit_runtime_failure("listener_task", source, &failure);
                     return Err(failure);
                 }
             }
@@ -357,6 +447,24 @@ async fn shutdown_listener_tasks(handles: &mut Vec<ListenerTaskHandle>) -> Resul
     Ok(())
 }
 
+async fn shutdown_admin_task(handle: &mut Option<AdminTaskHandle>) -> Result<(), Error> {
+    let Some(handle) = handle.take() else {
+        return Ok(());
+    };
+
+    let local_addr = handle.local_addr();
+    handle.abort();
+    match handle.join().await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error),
+        Err(join_error) if join_error.is_cancelled() => Ok(()),
+        Err(join_error) => Err(Error::io(format!(
+            "admin listener on '{}' panicked during shutdown: {join_error}",
+            local_addr
+        ))),
+    }
+}
+
 async fn wait_for_shutdown_signal() -> Result<(), Error> {
     tokio::signal::ctrl_c()
         .await
@@ -367,6 +475,50 @@ fn describe_source(source: &ExternalConfigSource) -> String {
     match source {
         ExternalConfigSource::LocalFile { path } => format!("local:{path}"),
         ExternalConfigSource::ClashSubscription { url } => format!("clash:{url}"),
+    }
+}
+
+fn describe_activation_source(source: ConfigActivationSource) -> &'static str {
+    match source {
+        ConfigActivationSource::LocalFile => "local_file",
+        ConfigActivationSource::FreshTranslation => "fresh_translation",
+        ConfigActivationSource::LastKnownGoodCache => "last_known_good_cache",
+    }
+}
+
+fn describe_listener_target(plan: &crate::listener::ListenerPlan) -> String {
+    format!(
+        "{} -> node:{} ({}, {})",
+        describe_target_ref(&plan.target),
+        plan.resolved_target.name,
+        describe_node_kind(plan.resolved_target.kind),
+        describe_origin(&plan.resolved_target.origin)
+    )
+}
+
+fn describe_target_ref(target: &TargetRef) -> String {
+    match target {
+        TargetRef::Node(name) => format!("node:{name}"),
+        TargetRef::Group(name) => format!("group:{name}"),
+    }
+}
+
+fn describe_node_kind(kind: NodeKind) -> &'static str {
+    match kind {
+        NodeKind::DirectTcp => "DirectTcp",
+        NodeKind::Trojan => "Trojan",
+    }
+}
+
+fn describe_origin(origin: &ConfigOrigin) -> String {
+    match origin {
+        ConfigOrigin::Inline => "inline".to_string(),
+        ConfigOrigin::Provider { provider, subscription } => {
+            format!("provider:{provider}@{subscription}")
+        }
+        ConfigOrigin::Subscription { subscription } => {
+            format!("subscription:{subscription}")
+        }
     }
 }
 
@@ -390,7 +542,6 @@ mod tests {
     use crate::listener::{
         ListenerAdmissionPlan, ListenerHandler, ListenerPlan, ListenerTaskHandle,
     };
-    use crate::operations::OperationsPlan;
     use crate::provider::cache::CacheStore;
     use crate::subscription::ConfigActivationSource;
 
@@ -406,7 +557,13 @@ mod tests {
             }],
             nodes: vec![NodeInput {
                 name: "node-a".to_string(),
-                address: "1.1.1.1:443".to_string(),
+                kind: crate::config::external::NodeKindInput::DirectTcp,
+                address: None,
+                server: None,
+                port: None,
+                password: None,
+                sni: None,
+                skip_cert_verify: false,
                 provider: None,
                 subscription: None,
             }],
@@ -425,10 +582,7 @@ mod tests {
         .expect("local startup source should load");
 
         assert_eq!(activation.source, ConfigActivationSource::LocalFile);
-        assert_eq!(
-            activation.active_config.listeners()[0].bind,
-            "127.0.0.1:1080"
-        );
+        assert_eq!(activation.active_config.listeners()[0].bind, "127.0.0.1:1080");
         assert_eq!(activation.translation_error, None);
 
         let _ = fs::remove_file(path);
@@ -439,16 +593,27 @@ mod tests {
         let cache_path = temp_path("fresh-cache");
         let cache = CacheStore::new(cache_path.clone());
 
-        let activation = load_startup_config(
-            StartupConfigInput::Document(valid_clash_document()),
-            Some(&cache),
-        )
-        .await
-        .expect("valid Clash document should activate");
+        let activation =
+            load_startup_config(StartupConfigInput::Document(valid_clash_document()), Some(&cache))
+                .await
+                .expect("valid Clash document should activate");
 
         assert_eq!(activation.source, ConfigActivationSource::FreshTranslation);
-        assert_eq!(activation.active_config.nodes()[0].name, "edge-a");
+        assert_eq!(activation.active_config.listeners().len(), 2);
+        assert_eq!(activation.active_config.nodes().len(), 1);
+        assert_eq!(activation.active_config.groups().len(), 2);
+        assert_eq!(activation.active_config.subscriptions().len(), 1);
         assert_eq!(activation.translation_error, None);
+        assert_eq!(activation.active_config.listeners()[0].name, "local-socks");
+        assert_eq!(activation.active_config.listeners()[1].name, "local-connect");
+        assert_eq!(
+            activation
+                .active_config
+                .resolve_target_node(&activation.active_config.listeners()[0].target)
+                .expect("listener target should resolve")
+                .name,
+            "trojan-a"
+        );
         assert!(cache.path().exists());
 
         let _ = fs::remove_file(cache_path);
@@ -459,12 +624,10 @@ mod tests {
         let cache_path = temp_path("rollback-cache");
         let cache = CacheStore::new(cache_path.clone());
 
-        let fresh = load_startup_config(
-            StartupConfigInput::Document(valid_clash_document()),
-            Some(&cache),
-        )
-        .await
-        .expect("seed translation should persist cache");
+        let fresh =
+            load_startup_config(StartupConfigInput::Document(valid_clash_document()), Some(&cache))
+                .await
+                .expect("seed translation should persist cache");
         assert_eq!(fresh.source, ConfigActivationSource::FreshTranslation);
 
         let activation = load_startup_config(
@@ -474,11 +637,11 @@ mod tests {
         .await
         .expect("startup should fall back to cache");
 
-        assert_eq!(
-            activation.source,
-            ConfigActivationSource::LastKnownGoodCache
-        );
-        assert_eq!(activation.active_config.nodes()[0].name, "edge-a");
+        assert_eq!(activation.source, ConfigActivationSource::LastKnownGoodCache);
+        assert_eq!(activation.active_config.listeners().len(), 2);
+        assert_eq!(activation.active_config.nodes().len(), 1);
+        assert_eq!(activation.active_config.subscriptions().len(), 1);
+        assert_eq!(activation.active_config.groups().len(), 2);
         assert!(activation.translation_error.is_some());
 
         let _ = fs::remove_file(cache_path);
@@ -491,15 +654,16 @@ mod tests {
             },
             r#"
 proxies:
-  - name: edge-a
-    type: ss
-    server: 1.1.1.1
+  - name: trojan-a
+    type: trojan
+    server: 127.0.0.1
     port: 443
+    password: secret
 proxy-groups:
-  - name: primary
+  - name: proxy
     type: select
     proxies:
-      - edge-a
+      - trojan-a
 "#,
         )
     }
@@ -530,25 +694,6 @@ rules:
     }
 
     #[tokio::test]
-    async fn startup_uses_explicit_error_for_unsupported_https_source_loading() {
-        let error = load_startup_config(
-            StartupConfigInput::Source(ExternalConfigSource::ClashSubscription {
-                url: "https://example.com/subscription".to_string(),
-            }),
-            None,
-        )
-        .await
-        .expect_err("https Clash source loading should stay outside this minimal stage");
-
-        assert_eq!(
-            error,
-            crate::error::Error::unsupported(
-                "https Clash subscription loading is not supported in this stage for 'https://example.com/subscription'; use http:// or preload the document",
-            )
-        );
-    }
-
-    #[tokio::test]
     async fn startup_prepare_runtime_builds_runtime_state_from_local_source() {
         let path = temp_path("runtime-startup");
         let config = ExternalConfig {
@@ -560,22 +705,23 @@ rules:
             }],
             nodes: vec![NodeInput {
                 name: "node-a".to_string(),
-                address: "1.1.1.1:443".to_string(),
+                kind: crate::config::external::NodeKindInput::DirectTcp,
+                address: None,
+                server: None,
+                port: None,
+                password: None,
+                sni: None,
+                skip_cert_verify: false,
                 provider: None,
                 subscription: None,
             }],
             ..ExternalConfig::default()
         };
-        fs::write(
-            &path,
-            serde_yaml::to_string(&config).expect("config should serialize"),
-        )
-        .expect("config file should be written");
+        fs::write(&path, serde_yaml::to_string(&config).expect("config should serialize"))
+            .expect("config file should be written");
 
         let startup = prepare_runtime(&StartupOptions {
-            source: ExternalConfigSource::LocalFile {
-                path: path.display().to_string(),
-            },
+            source: ExternalConfigSource::LocalFile { path: path.display().to_string() },
             cache_path: None,
         })
         .await
@@ -592,24 +738,17 @@ rules:
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/example.yaml");
 
         let startup = prepare_runtime(&StartupOptions {
-            source: ExternalConfigSource::LocalFile {
-                path: path.display().to_string(),
-            },
+            source: ExternalConfigSource::LocalFile { path: path.display().to_string() },
             cache_path: None,
         })
         .await
         .expect("repository example config should prepare a runtime");
 
         assert_eq!(startup.activation.source, ConfigActivationSource::LocalFile);
-        assert_eq!(startup.runtime.listeners().listeners().len(), 1);
-        assert_eq!(
-            startup.runtime.active_config().listeners()[0].name,
-            "local-socks"
-        );
-        assert_eq!(
-            startup.runtime.active_config().nodes()[0].name,
-            "default-upstream"
-        );
+        assert_eq!(startup.runtime.listeners().listeners().len(), 2);
+        assert_eq!(startup.runtime.active_config().listeners()[0].name, "local-socks");
+        assert_eq!(startup.runtime.active_config().listeners()[1].name, "local-connect");
+        assert_eq!(startup.runtime.active_config().nodes()[0].name, "default-upstream");
     }
 
     #[tokio::test]
@@ -618,22 +757,23 @@ rules:
         let config = ExternalConfig {
             nodes: vec![NodeInput {
                 name: "node-a".to_string(),
-                address: "1.1.1.1:443".to_string(),
+                kind: crate::config::external::NodeKindInput::DirectTcp,
+                address: None,
+                server: None,
+                port: None,
+                password: None,
+                sni: None,
+                skip_cert_verify: false,
                 provider: None,
                 subscription: None,
             }],
             ..ExternalConfig::default()
         };
-        fs::write(
-            &path,
-            serde_yaml::to_string(&config).expect("config should serialize"),
-        )
-        .expect("config file should be written");
+        fs::write(&path, serde_yaml::to_string(&config).expect("config should serialize"))
+            .expect("config file should be written");
 
         let error = prepare_runtime(&StartupOptions {
-            source: ExternalConfigSource::LocalFile {
-                path: path.display().to_string(),
-            },
+            source: ExternalConfigSource::LocalFile { path: path.display().to_string() },
             cache_path: None,
         })
         .await
@@ -654,14 +794,18 @@ rules:
     fn startup_source_parser_keeps_boundary_simple() {
         assert_eq!(
             startup_source_from_arg("/tmp/minibox.yaml"),
-            ExternalConfigSource::LocalFile {
-                path: "/tmp/minibox.yaml".to_string()
-            }
+            ExternalConfigSource::LocalFile { path: "/tmp/minibox.yaml".to_string() }
         );
         assert_eq!(
             startup_source_from_arg("http://example.com/subscription"),
             ExternalConfigSource::ClashSubscription {
                 url: "http://example.com/subscription".to_string()
+            }
+        );
+        assert_eq!(
+            startup_source_from_arg("https://example.com/subscription"),
+            ExternalConfigSource::ClashSubscription {
+                url: "https://example.com/subscription".to_string()
             }
         );
     }
@@ -670,9 +814,7 @@ rules:
     fn startup_plan_defaults_to_repository_example_config() {
         assert_eq!(
             build_startup_plan().subscription.source,
-            ExternalConfigSource::LocalFile {
-                path: "config/example.yaml".to_string()
-            }
+            ExternalConfigSource::LocalFile { path: "config/example.yaml".to_string() }
         );
     }
 
@@ -683,31 +825,27 @@ rules:
         })
         .expect("remote source should get a cache path");
 
-        assert_eq!(
-            cache_path,
-            PathBuf::from(".minibox/cache/http-example-com-a-b-c.yaml")
-        );
+        assert_eq!(cache_path, PathBuf::from(".minibox/cache/http-example-com-a-b-c.yaml"));
     }
 
     #[tokio::test]
     async fn runtime_wait_returns_shutdown_reason_when_signal_arrives() {
         let mut handles = vec![spawn_idle_listener_task("local-socks", 1080)];
-        let reason =
-            wait_for_runtime_stop(&OperationsPlan::default(), &mut handles, async { Ok(()) })
-                .await
-                .expect("shutdown signal should stop runtime");
+        let source = ExternalConfigSource::LocalFile { path: "config/example.yaml".to_string() };
+        let reason = wait_for_runtime_stop(&source, &mut handles, async { Ok(()) })
+            .await
+            .expect("shutdown signal should stop runtime");
 
         assert_eq!(reason, "shutdown signal received");
-        shutdown_listener_tasks(&mut handles)
-            .await
-            .expect("listener shutdown should succeed");
+        shutdown_listener_tasks(&mut handles).await.expect("listener shutdown should succeed");
     }
 
     #[tokio::test]
     async fn runtime_wait_propagates_listener_failure() {
         let mut handles = vec![spawn_failed_listener_task("local-socks", 1080)];
+        let source = ExternalConfigSource::LocalFile { path: "config/example.yaml".to_string() };
         let error = wait_for_runtime_stop(
-            &OperationsPlan::default(),
+            &source,
             &mut handles,
             std::future::pending::<Result<(), crate::error::Error>>(),
         )
@@ -737,23 +875,24 @@ rules:
             }],
             nodes: vec![NodeInput {
                 name: "node-a".to_string(),
-                address: "1.1.1.1:443".to_string(),
+                kind: crate::config::external::NodeKindInput::DirectTcp,
+                address: None,
+                server: None,
+                port: None,
+                password: None,
+                sni: None,
+                skip_cert_verify: false,
                 provider: None,
                 subscription: None,
             }],
             ..ExternalConfig::default()
         };
-        fs::write(
-            &path,
-            serde_yaml::to_string(&config).expect("config should serialize"),
-        )
-        .expect("config file should be written");
+        fs::write(&path, serde_yaml::to_string(&config).expect("config should serialize"))
+            .expect("config file should be written");
 
         match run_until(
             StartupOptions {
-                source: ExternalConfigSource::LocalFile {
-                    path: path.display().to_string(),
-                },
+                source: ExternalConfigSource::LocalFile { path: path.display().to_string() },
                 cache_path: None,
             },
             async { Ok(()) },
@@ -800,6 +939,12 @@ rules:
             bind: format!("127.0.0.1:{port}"),
             protocol: ProtocolKind::Socks5,
             target: TargetRef::Node("node-a".to_string()),
+            resolved_target: crate::config::internal::NodeConfig {
+                name: "node-a".to_string(),
+                kind: crate::config::internal::NodeKind::DirectTcp,
+                trojan: None,
+                origin: crate::config::internal::ConfigOrigin::Inline,
+            },
             handler: ListenerHandler::Socks5,
             admission: ListenerAdmissionPlan { shared_limit: 64 },
         }

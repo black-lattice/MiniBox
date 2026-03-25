@@ -5,19 +5,39 @@
       "bind": "127.0.0.1:1080",
       "protocol": "Socks5",
       "target": {
-        "Node": "default-upstream"
+        "Group": "minibox-entry"
+      }
+    },
+    {
+      "name": "local-connect",
+      "bind": "127.0.0.1:8080",
+      "protocol": "HttpConnect",
+      "target": {
+        "Group": "minibox-entry"
       }
     }
   ],
   "nodes": [
     {
       "name": "default-upstream",
-      "address": "1.1.1.1:443",
+      "kind": "DirectTcp",
       "provider": null,
       "subscription": null
     }
   ],
-  "groups": [],
+  "groups": [
+    {
+      "name": "minibox-entry",
+      "strategy": "Select",
+      "members": [
+        {
+          "Node": "default-upstream"
+        }
+      ],
+      "provider": null,
+      "subscription": null
+    }
+  ],
   "subscriptions": [],
   "providers": [],
   "limits": {

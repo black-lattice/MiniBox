@@ -2,26 +2,16 @@ use crate::health::HealthPlan;
 use crate::logging::LoggingPlan;
 use crate::metrics::MetricsPlan;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct OperationsPlan {
     pub logging: LoggingPlan,
     pub metrics: MetricsPlan,
     pub health: HealthPlan,
 }
 
-impl Default for OperationsPlan {
-    fn default() -> Self {
-        Self {
-            logging: LoggingPlan::default(),
-            metrics: MetricsPlan::default(),
-            health: HealthPlan::default(),
-        }
-    }
-}
-
 impl OperationsPlan {
     pub fn summary(&self) -> &'static str {
-        "typed log events, low-cardinality metric descriptors, and health/readiness probes are planned."
+        "typed log events, a minimal Prometheus surface, and health/readiness probes are available."
     }
 }
 

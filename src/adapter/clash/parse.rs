@@ -127,6 +127,14 @@ fn parse_proxies(
                     let value = required_scalar(value, nested, "proxy port")?;
                     proxy.port = Some(parse_port(value.as_str(), nested.number)?);
                 }
+                "password" => {
+                    proxy.password = Some(required_scalar(value, nested, "proxy password")?)
+                }
+                "sni" => proxy.sni = Some(required_scalar(value, nested, "proxy sni")?),
+                "skip-cert-verify" => {
+                    let value = required_scalar(value, nested, "proxy skip-cert-verify")?;
+                    proxy.skip_cert_verify = parse_bool(value.as_str(), nested.number)?;
+                }
                 _ => {
                     if value.is_none() {
                         skip_nested_block(lines, index, nested.indent);
@@ -274,6 +282,9 @@ fn apply_proxy_field(
         "type" => proxy.kind = clean_scalar(value),
         "server" => proxy.server = Some(clean_scalar(value)),
         "port" => proxy.port = Some(parse_port(value, line.number)?),
+        "password" => proxy.password = Some(clean_scalar(value)),
+        "sni" => proxy.sni = Some(clean_scalar(value)),
+        "skip-cert-verify" => proxy.skip_cert_verify = parse_bool(value, line.number)?,
         _ => {}
     }
     Ok(())
@@ -325,10 +336,7 @@ fn parse_string_list_block(
     while *index < lines.len() && lines[*index].indent >= item_indent {
         let line = &lines[*index];
         if line.indent != item_indent || !line.content.starts_with('-') {
-            return Err(Error::validation(format!(
-                "expected list item at line {}",
-                line.number
-            )));
+            return Err(Error::validation(format!("expected list item at line {}", line.number)));
         }
 
         let value = line.content[1..].trim_start();
@@ -346,48 +354,32 @@ fn parse_string_list_block(
     Ok(items)
 }
 
-fn split_key_value<'a>(line: &'a Line) -> Result<(&'a str, Option<&'a str>), Error> {
+fn split_key_value(line: &Line) -> Result<(&str, Option<&str>), Error> {
     split_inline_key_value_optional(line.content.as_str(), line.number)
 }
 
-fn split_inline_key_value<'a>(
-    content: &'a str,
-    line_number: usize,
-) -> Result<(&'a str, &'a str), Error> {
+fn split_inline_key_value(content: &str, line_number: usize) -> Result<(&str, &str), Error> {
     let (key, value) = split_inline_key_value_optional(content, line_number)?;
     let Some(value) = value else {
-        return Err(Error::validation(format!(
-            "expected inline value at line {}",
-            line_number
-        )));
+        return Err(Error::validation(format!("expected inline value at line {}", line_number)));
     };
     Ok((key, value))
 }
 
-fn split_inline_key_value_optional<'a>(
-    content: &'a str,
+fn split_inline_key_value_optional(
+    content: &str,
     line_number: usize,
-) -> Result<(&'a str, Option<&'a str>), Error> {
+) -> Result<(&str, Option<&str>), Error> {
     let Some((key, remainder)) = content.split_once(':') else {
-        return Err(Error::validation(format!(
-            "expected key/value pair at line {}",
-            line_number
-        )));
+        return Err(Error::validation(format!("expected key/value pair at line {}", line_number)));
     };
     let key = key.trim();
     if key.is_empty() {
-        return Err(Error::validation(format!(
-            "empty key at line {}",
-            line_number
-        )));
+        return Err(Error::validation(format!("empty key at line {}", line_number)));
     }
 
     let remainder = remainder.trim_start();
-    if remainder.is_empty() {
-        Ok((key, None))
-    } else {
-        Ok((key, Some(remainder)))
-    }
+    if remainder.is_empty() { Ok((key, None)) } else { Ok((key, Some(remainder))) }
 }
 
 fn required_scalar(value: Option<&str>, line: &Line, field: &str) -> Result<String, Error> {
@@ -404,6 +396,16 @@ fn parse_port(raw: &str, line_number: usize) -> Result<u16, Error> {
     raw.trim().parse::<u16>().map_err(|error| {
         Error::validation(format!("invalid port at line {}: {}", line_number, error))
     })
+}
+
+fn parse_bool(raw: &str, line_number: usize) -> Result<bool, Error> {
+    match raw.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => {
+            Err(Error::validation(format!("invalid boolean at line {}: {}", line_number, other)))
+        }
+    }
 }
 
 fn parse_inline_list(raw: &str) -> Option<Vec<String>> {

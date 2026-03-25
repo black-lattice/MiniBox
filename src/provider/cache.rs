@@ -116,13 +116,9 @@ impl CacheStore {
     }
 
     fn temp_path(&self) -> PathBuf {
-        let file_name = self
-            .path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("minibox-cache");
-        self.path
-            .with_file_name(format!("{file_name}.{}.tmp", std::process::id()))
+        let file_name =
+            self.path.file_name().and_then(|value| value.to_str()).unwrap_or("minibox-cache");
+        self.path.with_file_name(format!("{file_name}.{}.tmp", std::process::id()))
     }
 }
 
@@ -146,9 +142,7 @@ mod tests {
         let store = CacheStore::new(path.clone());
         let active = sample_active_config();
 
-        store
-            .store_validated_snapshot(&active)
-            .expect("validated snapshot should persist");
+        store.store_validated_snapshot(&active).expect("validated snapshot should persist");
 
         let restored = store
             .load_last_known_good()
@@ -169,9 +163,7 @@ mod tests {
             "Clash rule-level semantics are not supported at level B: found top-level 'rules'",
         );
 
-        store
-            .store_validated_snapshot(&active)
-            .expect("validated snapshot should persist");
+        store.store_validated_snapshot(&active).expect("validated snapshot should persist");
 
         let activation = store
             .activate_candidate(Err(translation_error.clone()))
@@ -188,7 +180,13 @@ mod tests {
         ActiveConfig::from_external(ExternalConfig {
             nodes: vec![NodeInput {
                 name: "node-a".to_string(),
-                address: "1.1.1.1:443".to_string(),
+                kind: crate::config::external::NodeKindInput::DirectTcp,
+                address: None,
+                server: None,
+                port: None,
+                password: None,
+                sni: None,
+                skip_cert_verify: false,
                 provider: None,
                 subscription: Some("clash-subscription".to_string()),
             }],
@@ -236,10 +234,7 @@ mod tests {
             .load_last_known_good()
             .expect("fresh activation should persist cache")
             .expect("snapshot should exist");
-        assert_eq!(
-            restored.groups()[0].members,
-            vec![TargetRef::Node("node-a".to_string())]
-        );
+        assert_eq!(restored.groups()[0].members, vec![TargetRef::Node("node-a".to_string())]);
 
         let _ = fs::remove_file(path);
     }

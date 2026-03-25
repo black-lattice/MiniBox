@@ -8,9 +8,7 @@ pub struct RelayPlan {
 
 impl RelayPlan {
     pub fn from_limits(limits: &Limits) -> Self {
-        Self {
-            buffer_bytes: limits.relay_buffer_bytes,
-        }
+        Self { buffer_bytes: limits.relay_buffer_bytes }
     }
 }
 

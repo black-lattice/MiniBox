@@ -14,9 +14,7 @@ pub struct HttpConnectHandler {
 
 impl Default for HttpConnectHandler {
     fn default() -> Self {
-        Self {
-            max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
-        }
+        Self { max_header_bytes: DEFAULT_MAX_HEADER_BYTES }
     }
 }
 
@@ -36,9 +34,7 @@ impl HttpConnectHandler {
             }
 
             if buffer.len() >= self.max_header_bytes {
-                let error = HttpConnectError::HeadersTooLarge {
-                    max_bytes: self.max_header_bytes,
-                };
+                let error = HttpConnectError::HeadersTooLarge { max_bytes: self.max_header_bytes };
                 self.send_response(stream, error.status_code()).await?;
                 return Err(error.into());
             }
@@ -93,28 +89,22 @@ mod tests {
     #[tokio::test]
     async fn accepts_connect_request_and_preserves_buffered_bytes() {
         let (mut client, mut server) = tokio::io::duplex(256);
-        let server_task = tokio::spawn(async move {
-            HttpConnectHandler::default()
-                .accept_connect(&mut server)
-                .await
-        });
+        let server_task =
+            tokio::spawn(
+                async move { HttpConnectHandler::default().accept_connect(&mut server).await },
+            );
 
         client
             .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\nping")
             .await
             .expect("write request");
 
-        let request = server_task
-            .await
-            .expect("server task should join")
-            .expect("request should parse");
+        let request =
+            server_task.await.expect("server task should join").expect("request should parse");
 
         assert_eq!(
             request.destination,
-            TargetEndpoint {
-                address: TargetAddr::Domain("example.com".to_string()),
-                port: 443,
-            }
+            TargetEndpoint { address: TargetAddr::Domain("example.com".to_string()), port: 443 }
         );
         assert_eq!(request.buffered_bytes, b"ping");
     }
@@ -122,11 +112,10 @@ mod tests {
     #[tokio::test]
     async fn rejects_non_connect_method_with_http_error_response() {
         let (mut client, mut server) = tokio::io::duplex(256);
-        let server_task = tokio::spawn(async move {
-            HttpConnectHandler::default()
-                .accept_connect(&mut server)
-                .await
-        });
+        let server_task =
+            tokio::spawn(
+                async move { HttpConnectHandler::default().accept_connect(&mut server).await },
+            );
 
         client
             .write_all(b"GET example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
@@ -134,19 +123,14 @@ mod tests {
             .expect("write request");
 
         let mut response = Vec::new();
-        client
-            .read_to_end(&mut response)
-            .await
-            .expect("read response");
+        client.read_to_end(&mut response).await.expect("read response");
         assert_eq!(
             response,
             crate::protocol::http_connect::codec::encode_response(StatusCode::MethodNotAllowed)
         );
 
-        let error = server_task
-            .await
-            .expect("server task should join")
-            .expect_err("request should fail");
+        let error =
+            server_task.await.expect("server task should join").expect_err("request should fail");
 
         assert!(matches!(
             error,
@@ -158,11 +142,10 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_target_with_bad_request_response() {
         let (mut client, mut server) = tokio::io::duplex(256);
-        let server_task = tokio::spawn(async move {
-            HttpConnectHandler::default()
-                .accept_connect(&mut server)
-                .await
-        });
+        let server_task =
+            tokio::spawn(
+                async move { HttpConnectHandler::default().accept_connect(&mut server).await },
+            );
 
         client
             .write_all(b"CONNECT https://example.com HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
@@ -170,19 +153,14 @@ mod tests {
             .expect("write request");
 
         let mut response = Vec::new();
-        client
-            .read_to_end(&mut response)
-            .await
-            .expect("read response");
+        client.read_to_end(&mut response).await.expect("read response");
         assert_eq!(
             response,
             crate::protocol::http_connect::codec::encode_response(StatusCode::BadRequest)
         );
 
-        let error = server_task
-            .await
-            .expect("server task should join")
-            .expect_err("request should fail");
+        let error =
+            server_task.await.expect("server task should join").expect_err("request should fail");
 
         assert!(matches!(
             error,
@@ -194,12 +172,10 @@ mod tests {
     async fn header_limit_stops_reading_once_budget_is_exhausted() {
         let request = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443";
         let mut stream = RecordingIo::new(request);
-        let error = HttpConnectHandler {
-            max_header_bytes: request.len() - 1,
-        }
-        .accept_connect(&mut stream)
-        .await
-        .expect_err("oversized headers should fail");
+        let error = HttpConnectHandler { max_header_bytes: request.len() - 1 }
+            .accept_connect(&mut stream)
+            .await
+            .expect_err("oversized headers should fail");
 
         assert_eq!(stream.bytes_read(), request.len() - 1);
         assert_eq!(
@@ -223,11 +199,7 @@ mod tests {
 
     impl RecordingIo {
         fn new(read_buf: &[u8]) -> Self {
-            Self {
-                read_buf: read_buf.to_vec(),
-                read_pos: 0,
-                write_buf: Vec::new(),
-            }
+            Self { read_buf: read_buf.to_vec(), read_pos: 0, write_buf: Vec::new() }
         }
 
         fn bytes_read(&self) -> usize {

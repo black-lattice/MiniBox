@@ -1,8 +1,10 @@
 use std::fs;
 use std::path::Path;
 
+use native_tls::TlsConnector as NativeTlsConnector;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_native_tls::TlsConnector;
 
 use crate::config::external::{ExternalConfig, ExternalConfigSource, ExternalDocument};
 use crate::config::internal::ActiveConfig;
@@ -28,9 +30,7 @@ pub fn read_local_file_document(path: impl AsRef<Path>) -> Result<ExternalDocume
     let raw = fs::read_to_string(path)?;
 
     Ok(ExternalDocument::new(
-        ExternalConfigSource::LocalFile {
-            path: path.display().to_string(),
-        },
+        ExternalConfigSource::LocalFile { path: path.display().to_string() },
         raw,
     ))
 }
@@ -57,32 +57,68 @@ pub fn load_local_document(document: &ExternalDocument) -> Result<ActiveConfig, 
 
 async fn fetch_clash_subscription_text(url: &str) -> Result<String, Error> {
     let source = ParsedHttpSource::parse(url)?;
-    let mut stream = TcpStream::connect((source.connect_host.as_str(), source.port))
-        .await
-        .map_err(|error| {
-            Error::io(format!(
-                "failed to connect to Clash subscription '{}': {error}",
-                url
-            ))
-        })?;
     let request = format!(
         "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: text/plain, application/yaml, */*\r\nConnection: close\r\n\r\n",
         source.request_target, source.host_header, HTTP_USER_AGENT
     );
-    stream
-        .write_all(request.as_bytes())
-        .await
-        .map_err(|error| {
-            Error::io(format!(
-                "failed to send Clash subscription request '{}': {error}",
-                url
-            ))
-        })?;
-
-    let response =
-        read_http_response_bytes(&mut stream, url, MAX_SUBSCRIPTION_RESPONSE_BYTES).await?;
+    let response = match source.scheme {
+        HttpSourceScheme::Http => {
+            let mut stream = connect_subscription_socket(url, &source).await?;
+            send_http_request(&mut stream, url, request.as_bytes()).await?;
+            read_http_response_bytes(&mut stream, url, MAX_SUBSCRIPTION_RESPONSE_BYTES).await?
+        }
+        HttpSourceScheme::Https => {
+            let stream = connect_subscription_socket(url, &source).await?;
+            let connector = build_subscription_tls_connector(url)?;
+            let mut stream = connector
+                .connect(source.tls_server_name.as_str(), stream)
+                .await
+                .map_err(|error| {
+                    Error::io(format!(
+                        "failed to establish TLS for Clash subscription '{}': {error}",
+                        url
+                    ))
+                })?;
+            send_http_request(&mut stream, url, request.as_bytes()).await?;
+            read_http_response_bytes(&mut stream, url, MAX_SUBSCRIPTION_RESPONSE_BYTES).await?
+        }
+    };
 
     parse_http_response(url, &response)
+}
+
+async fn connect_subscription_socket(
+    url: &str,
+    source: &ParsedHttpSource,
+) -> Result<TcpStream, Error> {
+    TcpStream::connect((source.connect_host.as_str(), source.port)).await.map_err(|error| {
+        Error::io(format!("failed to connect to Clash subscription '{}': {error}", url))
+    })
+}
+
+fn build_subscription_tls_connector(url: &str) -> Result<TlsConnector, Error> {
+    let connector = NativeTlsConnector::builder().build().map_err(|error| {
+        Error::io(format!(
+            "failed to build TLS connector for Clash subscription '{}': {error}",
+            url
+        ))
+    })?;
+    Ok(TlsConnector::from(connector))
+}
+
+async fn send_http_request<S>(stream: &mut S, url: &str, request: &[u8]) -> Result<(), Error>
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    stream.write_all(request).await.map_err(|error| {
+        Error::io(format!("failed to send Clash subscription request '{}': {error}", url))
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpSourceScheme {
+    Http,
+    Https,
 }
 
 async fn read_http_response_bytes<S>(
@@ -98,10 +134,7 @@ where
 
     loop {
         let read = stream.read(&mut chunk).await.map_err(|error| {
-            Error::io(format!(
-                "failed to read Clash subscription response '{}': {error}",
-                url
-            ))
+            Error::io(format!("failed to read Clash subscription response '{}': {error}", url))
         })?;
         if read == 0 {
             break;
@@ -122,7 +155,9 @@ where
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedHttpSource {
+    scheme: HttpSourceScheme,
     connect_host: String,
+    tls_server_name: String,
     host_header: String,
     port: u16,
     request_target: String,
@@ -137,21 +172,16 @@ impl ParsedHttpSource {
             )));
         };
 
-        match scheme {
-            "http" => {}
-            "https" => {
-                return Err(Error::unsupported(format!(
-                    "https Clash subscription loading is not supported in this stage for '{}'; use http:// or preload the document",
-                    url
-                )));
-            }
+        let scheme = match scheme {
+            "http" => HttpSourceScheme::Http,
+            "https" => HttpSourceScheme::Https,
             other => {
                 return Err(Error::unsupported(format!(
-                    "Clash subscription source '{}' uses unsupported scheme '{}'; only http:// is supported in this stage",
+                    "Clash subscription source '{}' uses unsupported scheme '{}'; only http:// and https:// are supported in this stage",
                     url, other
                 )));
             }
-        }
+        };
 
         if remainder.is_empty() {
             return Err(Error::validation(format!(
@@ -184,7 +214,11 @@ impl ParsedHttpSource {
             )));
         }
 
-        let (connect_host, host_header, port) = parse_authority(url, authority)?;
+        let default_port = match scheme {
+            HttpSourceScheme::Http => 80,
+            HttpSourceScheme::Https => 443,
+        };
+        let (connect_host, host_header, port) = parse_authority(url, authority, default_port)?;
         let request_target = if path_and_query.is_empty() {
             "/".to_string()
         } else if path_and_query.starts_with('?') {
@@ -194,6 +228,8 @@ impl ParsedHttpSource {
         };
 
         Ok(Self {
+            scheme,
+            tls_server_name: connect_host.clone(),
             connect_host,
             host_header,
             port,
@@ -202,7 +238,11 @@ impl ParsedHttpSource {
     }
 }
 
-fn parse_authority(url: &str, authority: &str) -> Result<(String, String, u16), Error> {
+fn parse_authority(
+    url: &str,
+    authority: &str,
+    default_port: u16,
+) -> Result<(String, String, u16), Error> {
     if authority.starts_with('[') {
         let Some(end) = authority.find(']') else {
             return Err(Error::validation(format!(
@@ -213,7 +253,7 @@ fn parse_authority(url: &str, authority: &str) -> Result<(String, String, u16), 
         let host = authority[1..end].to_string();
         let suffix = &authority[end + 1..];
         let port = if suffix.is_empty() {
-            80
+            default_port
         } else if let Some(raw_port) = suffix.strip_prefix(':') {
             parse_port(url, raw_port)?
         } else {
@@ -222,21 +262,18 @@ fn parse_authority(url: &str, authority: &str) -> Result<(String, String, u16), 
                 url
             )));
         };
-        let host_header = if port == 80 {
-            format!("[{host}]")
-        } else {
-            format!("[{host}]:{port}")
-        };
+        let host_header =
+            if port == default_port { format!("[{host}]") } else { format!("[{host}]:{port}") };
         return Ok((host, host_header, port));
     }
 
     let mut host = authority;
-    let mut port = 80;
-    if let Some((raw_host, raw_port)) = authority.rsplit_once(':') {
-        if !raw_host.contains(':') {
-            host = raw_host;
-            port = parse_port(url, raw_port)?;
-        }
+    let mut port = default_port;
+    if let Some((raw_host, raw_port)) = authority.rsplit_once(':')
+        && !raw_host.contains(':')
+    {
+        host = raw_host;
+        port = parse_port(url, raw_port)?;
     }
 
     if host.trim().is_empty() {
@@ -247,11 +284,7 @@ fn parse_authority(url: &str, authority: &str) -> Result<(String, String, u16), 
     }
 
     let host = host.trim().to_string();
-    let host_header = if port == 80 {
-        host.clone()
-    } else {
-        format!("{host}:{port}")
-    };
+    let host_header = if port == default_port { host.clone() } else { format!("{host}:{port}") };
     Ok((host, host_header, port))
 }
 
@@ -440,10 +473,7 @@ fn decode_chunked_body(url: &str, body: &[u8]) -> Result<Vec<u8>, Error> {
 }
 
 fn find_crlf(bytes: &[u8], start: usize) -> Option<usize> {
-    bytes[start..]
-        .windows(2)
-        .position(|window| window == b"\r\n")
-        .map(|offset| start + offset)
+    bytes[start..].windows(2).position(|window| window == b"\r\n").map(|offset| start + offset)
 }
 
 #[cfg(test)]
@@ -456,13 +486,14 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{
-        MAX_SUBSCRIPTION_RESPONSE_BYTES, load_local_document, parse_http_response,
-        read_http_response_bytes, read_source_document,
+        HttpSourceScheme, MAX_SUBSCRIPTION_RESPONSE_BYTES, ParsedHttpSource, load_local_document,
+        parse_http_response, read_http_response_bytes, read_source_document,
     };
     use crate::config::external::{
-        ExternalConfig, ExternalConfigSource, ListenerInput, ListenerProtocolInput, NodeInput,
-        TargetRefInput,
+        ExternalConfig, ExternalConfigSource, ExternalDocument, ListenerInput,
+        ListenerProtocolInput, NodeInput, TargetRefInput,
     };
+    use crate::config::internal::NodeKind;
     use crate::error::Error;
 
     #[tokio::test]
@@ -477,7 +508,13 @@ mod tests {
             }],
             nodes: vec![NodeInput {
                 name: "node-a".to_string(),
-                address: "1.1.1.1:443".to_string(),
+                kind: crate::config::external::NodeKindInput::DirectTcp,
+                address: None,
+                server: None,
+                port: None,
+                password: None,
+                sni: None,
+                skip_cert_verify: false,
                 provider: None,
                 subscription: None,
             }],
@@ -494,9 +531,53 @@ mod tests {
         let active = load_local_document(&document).expect("local document should normalize");
 
         assert_eq!(active.listeners()[0].name, "local-socks");
-        assert_eq!(active.nodes()[0].address, "1.1.1.1:443");
+        assert_eq!(active.nodes()[0].kind, NodeKind::DirectTcp);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn local_document_defaults_legacy_nodes_to_static_tcp_upstream() {
+        let document = ExternalDocument::new(
+            ExternalConfigSource::LocalFile { path: "/tmp/legacy-minibox.yaml".to_string() },
+            r#"
+{
+  "listeners": [
+    {
+      "name": "local-socks",
+      "bind": "127.0.0.1:1080",
+      "protocol": "Socks5",
+      "target": {
+        "Node": "node-a"
+      }
+    }
+  ],
+  "nodes": [
+    {
+      "name": "node-a",
+      "provider": null,
+      "subscription": null
+    }
+  ],
+  "groups": [],
+  "subscriptions": [],
+  "providers": [],
+  "limits": {
+    "max_connections": null,
+    "relay_buffer_bytes": null
+  },
+  "admin": {
+    "enabled": false,
+    "bind": null,
+    "access_token": null
+  }
+}
+"#,
+        );
+
+        let active = load_local_document(&document).expect("legacy local document should load");
+
+        assert_eq!(active.nodes()[0].kind, NodeKind::DirectTcp);
     }
 
     #[tokio::test]
@@ -506,16 +587,11 @@ mod tests {
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
             Err(error) => panic!("test server should bind: {error}"),
         };
-        let addr = listener
-            .local_addr()
-            .expect("test server should expose addr");
+        let addr = listener.local_addr().expect("test server should expose addr");
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("server should accept");
             let mut request = vec![0u8; 1024];
-            let read = stream
-                .read(&mut request)
-                .await
-                .expect("server should read request");
+            let read = stream.read(&mut request).await.expect("server should read request");
             let request = String::from_utf8_lossy(&request[..read]);
             assert!(request.starts_with("GET /subscription HTTP/1.1\r\n"));
             assert!(request.contains("Host: 127.0.0.1:"));
@@ -554,10 +630,7 @@ mod tests {
             MAX_SUBSCRIPTION_RESPONSE_BYTES + 1,
             "a".repeat(MAX_SUBSCRIPTION_RESPONSE_BYTES + 1)
         );
-        client
-            .write_all(oversized.as_bytes())
-            .await
-            .expect("oversized response should write");
+        client.write_all(oversized.as_bytes()).await.expect("oversized response should write");
         client.shutdown().await.expect("client should shut down");
 
         let error = server_task
@@ -574,19 +647,21 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn https_clash_subscription_loading_stays_explicitly_unsupported() {
-        let error = read_source_document(&ExternalConfigSource::ClashSubscription {
-            url: "https://example.com/subscription".to_string(),
-        })
-        .await
-        .expect_err("https loading should stay outside this minimal stage");
+    #[test]
+    fn parses_https_subscription_sources_with_default_tls_port() {
+        let source = ParsedHttpSource::parse("https://example.com/subscription?token=1")
+            .expect("https source should parse");
 
         assert_eq!(
-            error,
-            Error::unsupported(
-                "https Clash subscription loading is not supported in this stage for 'https://example.com/subscription'; use http:// or preload the document",
-            )
+            source,
+            ParsedHttpSource {
+                scheme: HttpSourceScheme::Https,
+                connect_host: "example.com".to_string(),
+                tls_server_name: "example.com".to_string(),
+                host_header: "example.com".to_string(),
+                port: 443,
+                request_target: "/subscription?token=1".to_string(),
+            }
         );
     }
 

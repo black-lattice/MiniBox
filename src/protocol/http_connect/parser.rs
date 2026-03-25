@@ -7,9 +7,7 @@ use crate::session::{TargetAddr, TargetEndpoint};
 
 pub fn parse_request(input: &[u8]) -> Result<Request, HttpConnectError> {
     let request = std::str::from_utf8(input).map_err(|_| HttpConnectError::InvalidEncoding)?;
-    let request = request
-        .strip_suffix("\r\n\r\n")
-        .ok_or(HttpConnectError::InvalidRequestLine)?;
+    let request = request.strip_suffix("\r\n\r\n").ok_or(HttpConnectError::InvalidRequestLine)?;
     let mut lines = request.split("\r\n");
     let request_line = lines.next().ok_or(HttpConnectError::InvalidRequestLine)?;
     let mut parts = request_line.split_ascii_whitespace();
@@ -39,26 +37,16 @@ pub fn parse_request(input: &[u8]) -> Result<Request, HttpConnectError> {
         let Some((name, _value)) = line.split_once(':') else {
             return Err(HttpConnectError::InvalidHeader);
         };
-        if name.is_empty()
-            || name
-                .chars()
-                .any(|ch| ch.is_ascii_whitespace() || ch.is_control())
-        {
+        if name.is_empty() || name.chars().any(|ch| ch.is_ascii_whitespace() || ch.is_control()) {
             return Err(HttpConnectError::InvalidHeader);
         }
     }
 
-    Ok(Request {
-        version,
-        destination: parse_target(target)?,
-    })
+    Ok(Request { version, destination: parse_target(target)? })
 }
 
 pub fn find_header_terminator(buffer: &[u8]) -> Option<usize> {
-    buffer
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|index| index + 4)
+    buffer.windows(4).position(|window| window == b"\r\n\r\n").map(|index| index + 4)
 }
 
 fn parse_target(target: &str) -> Result<TargetEndpoint, HttpConnectError> {
@@ -69,10 +57,7 @@ fn parse_target(target: &str) -> Result<TargetEndpoint, HttpConnectError> {
         let host = Ipv6Addr::from_str(host).map_err(|_| HttpConnectError::InvalidTarget)?;
         let port = parse_port(port)?;
 
-        return Ok(TargetEndpoint {
-            address: TargetAddr::Ipv6(host),
-            port,
-        });
+        return Ok(TargetEndpoint { address: TargetAddr::Ipv6(host), port });
     }
 
     let Some((host, port)) = target.rsplit_once(':') else {
@@ -96,9 +81,7 @@ fn parse_port(port: &str) -> Result<u16, HttpConnectError> {
         return Err(HttpConnectError::InvalidTarget);
     }
 
-    let port = port
-        .parse::<u16>()
-        .map_err(|_| HttpConnectError::InvalidTarget)?;
+    let port = port.parse::<u16>().map_err(|_| HttpConnectError::InvalidTarget)?;
     if port == 0 {
         return Err(HttpConnectError::InvalidTarget);
     }
@@ -107,8 +90,7 @@ fn parse_port(port: &str) -> Result<u16, HttpConnectError> {
 }
 
 fn is_valid_host(host: &str) -> bool {
-    host.bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+    host.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
 }
 
 #[cfg(test)]
@@ -178,10 +160,7 @@ mod tests {
         let error = parse_request(b"GET example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n")
             .expect_err("method should be rejected");
 
-        assert_eq!(
-            error,
-            HttpConnectError::UnsupportedMethod("GET".to_string())
-        );
+        assert_eq!(error, HttpConnectError::UnsupportedMethod("GET".to_string()));
     }
 
     #[test]
@@ -197,9 +176,6 @@ mod tests {
     fn finds_header_terminator_with_buffered_tunnel_bytes() {
         let input = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\nping";
 
-        assert_eq!(
-            find_header_terminator(input),
-            Some(input.len() - b"ping".len())
-        );
+        assert_eq!(find_header_terminator(input), Some(input.len() - b"ping".len()));
     }
 }
