@@ -9,9 +9,7 @@ async fn main() -> ExitCode {
         (Some(source), None) => startup_source_from_arg(&source),
         (None, None) => build_startup_plan().subscription.source,
         _ => {
-            eprintln!(
-                "usage: minibox [local-config-path|http://clash-subscription]"
-            );
+            eprintln!("usage: minibox [local-config-path|http://clash-subscription]");
             return ExitCode::from(2);
         }
     };

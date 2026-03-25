@@ -20,10 +20,7 @@ impl ClashLevelBAdapter {
         parse::parse_document(document)
     }
 
-    pub fn translate_external(
-        &self,
-        document: &ExternalDocument,
-    ) -> Result<ExternalConfig, Error> {
+    pub fn translate_external(&self, document: &ExternalDocument) -> Result<ExternalConfig, Error> {
         let parsed = self.parse(document)?;
         translate::translate_document(&document.source, &parsed)
     }

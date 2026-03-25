@@ -2,7 +2,7 @@
 
 `MiniBox` is a planning-first Rust proxy aimed at self-hosters and power users who want a lightweight daily-use proxy with explicit boundaries and low operational overhead.
 
-The repository now contains an implementation skeleton only. There is no full proxy data path yet, and there is no claim of feature completeness.
+The repository now contains a minimal direct TCP proxy data path for SOCKS5 and HTTP CONNECT, plus startup/config plumbing for local files and level-B Clash subscription translation. It is still intentionally narrow in scope and is not feature-complete.
 
 ## Scope
 
@@ -31,9 +31,9 @@ Explicitly out of scope for the MVP:
 ## Current Status
 
 - docs updated for level-B Clash subscription support
-- minimal Rust crate skeleton present
+- minimal direct SOCKS5 and HTTP CONNECT runtime path present
 - initial structured logging, metrics, and health/readiness planning hooks present
-- `cargo build` should succeed as a baseline integrity check
+- `cargo test` should succeed as a baseline integrity check
 
 ## Implementation Order
 

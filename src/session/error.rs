@@ -19,6 +19,17 @@ impl SessionError {
     pub fn unimplemented(message: impl Into<String>) -> Self {
         Self::Unimplemented(message.into())
     }
+
+    pub fn result_label(&self) -> &'static str {
+        match self {
+            Self::Io(_) => "io_error",
+            Self::Socks5(_) => "socks5_error",
+            Self::HttpConnect(_) => "http_connect_error",
+            Self::Resolve(_) => "resolve_error",
+            Self::Dial(_) => "dial_error",
+            Self::Unimplemented(_) => "unimplemented",
+        }
+    }
 }
 
 impl Display for SessionError {

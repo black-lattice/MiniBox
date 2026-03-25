@@ -44,6 +44,29 @@ impl LoggingPlan {
     }
 }
 
+pub fn default_log_event(name: &str) -> Option<LogEvent> {
+    DEFAULT_LOG_EVENTS
+        .iter()
+        .copied()
+        .find(|event| event.name == name)
+}
+
+pub fn emit_log_event(event: LogEvent, fields: &[(&str, String)]) {
+    let mut line = format!(
+        "level={} event={} message={:?}",
+        event.level.as_str(),
+        event.name,
+        event.message
+    );
+    for (key, value) in fields {
+        line.push(' ');
+        line.push_str(key);
+        line.push('=');
+        line.push_str(&format!("{value:?}"));
+    }
+    eprintln!("{line}");
+}
+
 pub const DEFAULT_LOG_EVENTS: &[LogEvent] = &[
     LogEvent {
         name: "startup.begin",

@@ -77,7 +77,10 @@ fn translate_nodes(
     for proxy in proxies {
         let name = normalize_name("proxy", proxy.name.as_str())?;
         if !seen.insert(name.clone()) {
-            return Err(Error::validation(format!("duplicate proxy name '{}'", name)));
+            return Err(Error::validation(format!(
+                "duplicate proxy name '{}'",
+                name
+            )));
         }
 
         let kind = normalize_name("proxy type", proxy.kind.as_str())?;
@@ -89,7 +92,11 @@ fn translate_nodes(
             )));
         }
 
-        let server = proxy.server.as_deref().map(str::trim).filter(|value| !value.is_empty());
+        let server = proxy
+            .server
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         let Some(server) = server else {
             return Err(Error::unsupported(format!(
                 "proxy '{}' of type '{}' cannot be translated without both server and port",
@@ -208,7 +215,10 @@ fn collect_names<T>(
     for item in items {
         let name = normalize_name(kind, selector(item))?;
         if !names.insert(name.clone()) {
-            return Err(Error::validation(format!("duplicate {kind} name '{}'", name)));
+            return Err(Error::validation(format!(
+                "duplicate {kind} name '{}'",
+                name
+            )));
         }
     }
 

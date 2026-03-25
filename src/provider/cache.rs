@@ -236,7 +236,10 @@ mod tests {
             .load_last_known_good()
             .expect("fresh activation should persist cache")
             .expect("snapshot should exist");
-        assert_eq!(restored.groups()[0].members, vec![TargetRef::Node("node-a".to_string())]);
+        assert_eq!(
+            restored.groups()[0].members,
+            vec![TargetRef::Node("node-a".to_string())]
+        );
 
         let _ = fs::remove_file(path);
     }

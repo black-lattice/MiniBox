@@ -27,8 +27,18 @@ impl BoundListener {
 }
 
 pub async fn bind_listener(plan: ListenerPlan) -> Result<BoundListener, Error> {
-    let listener = TcpListener::bind(&plan.bind).await?;
-    let local_addr = listener.local_addr()?;
+    let listener = TcpListener::bind(&plan.bind).await.map_err(|error| {
+        Error::io(format!(
+            "failed to bind listener '{}' ({:?}) on '{}': {error}",
+            plan.name, plan.protocol, plan.bind
+        ))
+    })?;
+    let local_addr = listener.local_addr().map_err(|error| {
+        Error::io(format!(
+            "listener '{}' ({:?}) bound on '{}' but local address lookup failed: {error}",
+            plan.name, plan.protocol, plan.bind
+        ))
+    })?;
 
     Ok(BoundListener {
         plan,

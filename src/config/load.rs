@@ -9,8 +9,11 @@ use crate::config::internal::ActiveConfig;
 use crate::error::Error;
 
 const HTTP_USER_AGENT: &str = "MiniBox/0.1";
+const MAX_SUBSCRIPTION_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
-pub async fn read_source_document(source: &ExternalConfigSource) -> Result<ExternalDocument, Error> {
+pub async fn read_source_document(
+    source: &ExternalConfigSource,
+) -> Result<ExternalDocument, Error> {
     match source {
         ExternalConfigSource::LocalFile { path } => read_local_file_document(path.as_str()),
         ExternalConfigSource::ClashSubscription { url } => {
@@ -66,22 +69,55 @@ async fn fetch_clash_subscription_text(url: &str) -> Result<String, Error> {
         "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: text/plain, application/yaml, */*\r\nConnection: close\r\n\r\n",
         source.request_target, source.host_header, HTTP_USER_AGENT
     );
-    stream.write_all(request.as_bytes()).await.map_err(|error| {
-        Error::io(format!(
-            "failed to send Clash subscription request '{}': {error}",
-            url
-        ))
-    })?;
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|error| {
+            Error::io(format!(
+                "failed to send Clash subscription request '{}': {error}",
+                url
+            ))
+        })?;
 
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).await.map_err(|error| {
-        Error::io(format!(
-            "failed to read Clash subscription response '{}': {error}",
-            url
-        ))
-    })?;
+    let response =
+        read_http_response_bytes(&mut stream, url, MAX_SUBSCRIPTION_RESPONSE_BYTES).await?;
 
     parse_http_response(url, &response)
+}
+
+async fn read_http_response_bytes<S>(
+    stream: &mut S,
+    url: &str,
+    max_response_bytes: usize,
+) -> Result<Vec<u8>, Error>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    let mut response = Vec::with_capacity(max_response_bytes.min(8 * 1024));
+    let mut chunk = [0u8; 8 * 1024];
+
+    loop {
+        let read = stream.read(&mut chunk).await.map_err(|error| {
+            Error::io(format!(
+                "failed to read Clash subscription response '{}': {error}",
+                url
+            ))
+        })?;
+        if read == 0 {
+            break;
+        }
+
+        if response.len().saturating_add(read) > max_response_bytes {
+            return Err(Error::validation(format!(
+                "Clash subscription response '{}' exceeded {} bytes",
+                url, max_response_bytes
+            )));
+        }
+
+        response.extend_from_slice(&chunk[..read]);
+    }
+
+    Ok(response)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,10 +202,7 @@ impl ParsedHttpSource {
     }
 }
 
-fn parse_authority(
-    url: &str,
-    authority: &str,
-) -> Result<(String, String, u16), Error> {
+fn parse_authority(url: &str, authority: &str) -> Result<(String, String, u16), Error> {
     if authority.starts_with('[') {
         let Some(end) = authority.find(']') else {
             return Err(Error::validation(format!(
@@ -422,7 +455,10 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::{load_local_document, parse_http_response, read_source_document};
+    use super::{
+        MAX_SUBSCRIPTION_RESPONSE_BYTES, load_local_document, parse_http_response,
+        read_http_response_bytes, read_source_document,
+    };
     use crate::config::external::{
         ExternalConfig, ExternalConfigSource, ListenerInput, ListenerProtocolInput, NodeInput,
         TargetRefInput,
@@ -470,7 +506,9 @@ mod tests {
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
             Err(error) => panic!("test server should bind: {error}"),
         };
-        let addr = listener.local_addr().expect("test server should expose addr");
+        let addr = listener
+            .local_addr()
+            .expect("test server should expose addr");
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("server should accept");
             let mut request = vec![0u8; 1024];
@@ -497,6 +535,43 @@ mod tests {
 
         assert_eq!(document.raw, "proxies:\n  - name: edge-a\n");
         server.await.expect("server task should join");
+    }
+
+    #[tokio::test]
+    async fn clash_subscription_reader_rejects_oversized_http_responses() {
+        let (mut client, mut server) = tokio::io::duplex(256);
+        let server_task = tokio::spawn(async move {
+            read_http_response_bytes(
+                &mut server,
+                "http://example.com/subscription",
+                MAX_SUBSCRIPTION_RESPONSE_BYTES,
+            )
+            .await
+        });
+
+        let oversized = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+            MAX_SUBSCRIPTION_RESPONSE_BYTES + 1,
+            "a".repeat(MAX_SUBSCRIPTION_RESPONSE_BYTES + 1)
+        );
+        client
+            .write_all(oversized.as_bytes())
+            .await
+            .expect("oversized response should write");
+        client.shutdown().await.expect("client should shut down");
+
+        let error = server_task
+            .await
+            .expect("server task should join")
+            .expect_err("oversized response should fail");
+
+        assert_eq!(
+            error,
+            Error::validation(format!(
+                "Clash subscription response 'http://example.com/subscription' exceeded {} bytes",
+                MAX_SUBSCRIPTION_RESPONSE_BYTES
+            ))
+        );
     }
 
     #[tokio::test]

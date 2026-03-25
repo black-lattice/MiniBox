@@ -1,4 +1,6 @@
 use std::path::{Path, PathBuf};
+use std::pin::pin;
+use std::time::Duration;
 
 use crate::operations::OperationsPlan;
 use crate::provider::cache::CacheStore;
@@ -10,9 +12,13 @@ use crate::{
     adapter::clash::ClashLevelBAdapter,
     config::external::{ExternalConfigSource, ExternalDocument},
     error::Error,
+    health::ProbeStatus,
     listener::ListenerTaskHandle,
+    logging::emit_log_event,
     runtime::RuntimeState,
 };
+
+const LISTENER_TASK_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 pub struct StartupPlan {
@@ -115,16 +121,51 @@ pub async fn prepare_runtime(options: &StartupOptions) -> Result<StartupRuntime,
 }
 
 pub async fn run(options: StartupOptions) -> Result<(), Error> {
+    run_until(options, wait_for_shutdown_signal()).await
+}
+
+async fn run_until<F>(options: StartupOptions, shutdown_signal: F) -> Result<(), Error>
+where
+    F: std::future::Future<Output = Result<(), Error>>,
+{
     let startup = prepare_runtime(&options).await?;
     emit_startup_logs(&startup, &options);
 
-    let handles = startup.spawn_accept_loops().await?;
+    let mut handles = match startup.spawn_accept_loops().await {
+        Ok(handles) => handles,
+        Err(error) => {
+            emit_runtime_readiness_changed(
+                &startup.plan.operations,
+                ProbeStatus::Degraded,
+                format!("listener startup failed: {error}"),
+            );
+            return Err(error);
+        }
+    };
     for handle in &handles {
         emit_listener_bound(&startup.plan.operations, handle);
     }
+    emit_runtime_readiness_changed(
+        &startup.plan.operations,
+        ProbeStatus::Ready,
+        format!("{} listener(s) bound", handles.len()),
+    );
 
-    let _handles = handles;
-    std::future::pending::<Result<(), Error>>().await
+    match wait_for_runtime_stop(&startup.plan.operations, &mut handles, shutdown_signal).await {
+        Ok(shutdown_reason) => {
+            emit_runtime_readiness_changed(
+                &startup.plan.operations,
+                ProbeStatus::Degraded,
+                shutdown_reason,
+            );
+            shutdown_listener_tasks(&mut handles).await
+        }
+        Err(error) => {
+            let shutdown_result = shutdown_listener_tasks(&mut handles).await;
+            shutdown_result?;
+            Err(error)
+        }
+    }
 }
 
 pub fn startup_source_from_arg(value: &str) -> ExternalConfigSource {
@@ -191,7 +232,8 @@ fn emit_startup_logs(startup: &StartupRuntime, options: &StartupOptions) {
         }
     }
 
-    if startup.activation.source == crate::subscription::ConfigActivationSource::LastKnownGoodCache {
+    if startup.activation.source == crate::subscription::ConfigActivationSource::LastKnownGoodCache
+    {
         if let Some(event) = operations.logging.event("provider.cache_rollback_used") {
             emit_log_event(
                 event,
@@ -225,20 +267,100 @@ fn emit_listener_bound(operations: &OperationsPlan, handle: &ListenerTaskHandle)
     }
 }
 
-fn emit_log_event(event: crate::logging::LogEvent, fields: &[(&str, String)]) {
-    let mut line = format!(
-        "level={} event={} message={:?}",
-        event.level.as_str(),
-        event.name,
-        event.message
-    );
-    for (key, value) in fields {
-        line.push(' ');
-        line.push_str(key);
-        line.push('=');
-        line.push_str(&format!("{value:?}"));
+fn emit_runtime_readiness_changed(
+    operations: &OperationsPlan,
+    status: ProbeStatus,
+    reason: String,
+) {
+    if let Some(event) = operations.logging.event("runtime.readiness_changed") {
+        emit_log_event(
+            event,
+            &[("status", status.as_str().to_string()), ("reason", reason)],
+        );
     }
-    eprintln!("{line}");
+}
+
+async fn wait_for_runtime_stop<F>(
+    operations: &OperationsPlan,
+    handles: &mut Vec<ListenerTaskHandle>,
+    shutdown_signal: F,
+) -> Result<String, Error>
+where
+    F: std::future::Future<Output = Result<(), Error>>,
+{
+    let mut shutdown_signal = pin!(shutdown_signal);
+    let mut poll_interval = tokio::time::interval(LISTENER_TASK_POLL_INTERVAL);
+    poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            signal = &mut shutdown_signal => {
+                signal?;
+                return Ok("shutdown signal received".to_string());
+            }
+            _ = poll_interval.tick() => {
+                if let Some(index) = handles.iter().position(ListenerTaskHandle::is_finished) {
+                    let handle = handles.swap_remove(index);
+                    let listener_name = handle.plan().name.clone();
+                    let local_addr = handle.local_addr();
+                    let failure = match handle.join().await {
+                        Ok(Ok(())) => Error::io(format!(
+                            "listener '{}' on '{}' stopped without an error, which should not happen",
+                            listener_name,
+                            local_addr
+                        )),
+                        Ok(Err(error)) => error,
+                        Err(join_error) if join_error.is_cancelled() => Error::io(format!(
+                            "listener '{}' on '{}' was cancelled unexpectedly",
+                            listener_name,
+                            local_addr
+                        )),
+                        Err(join_error) => Error::io(format!(
+                            "listener '{}' on '{}' panicked: {join_error}",
+                            listener_name,
+                            local_addr
+                        )),
+                    };
+                    emit_runtime_readiness_changed(
+                        operations,
+                        ProbeStatus::Degraded,
+                        format!("listener '{}' failed: {failure}", listener_name),
+                    );
+                    return Err(failure);
+                }
+            }
+        }
+    }
+}
+
+async fn shutdown_listener_tasks(handles: &mut Vec<ListenerTaskHandle>) -> Result<(), Error> {
+    for handle in handles.iter() {
+        handle.abort();
+    }
+
+    while let Some(handle) = handles.pop() {
+        let listener_name = handle.plan().name.clone();
+        let local_addr = handle.local_addr();
+        match handle.join().await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(join_error) if join_error.is_cancelled() => {}
+            Err(join_error) => {
+                return Err(Error::io(format!(
+                    "listener '{}' on '{}' panicked during shutdown: {join_error}",
+                    listener_name, local_addr
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn wait_for_shutdown_signal() -> Result<(), Error> {
+    tokio::signal::ctrl_c()
+        .await
+        .map_err(|error| Error::io(format!("failed to listen for shutdown signal: {error}")))
 }
 
 fn describe_source(source: &ExternalConfigSource) -> String {
@@ -251,17 +373,24 @@ fn describe_source(source: &ExternalConfigSource) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::net::{Ipv4Addr, SocketAddr};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        StartupConfigInput, StartupOptions, default_cache_path, load_startup_config,
-        prepare_runtime, startup_source_from_arg,
+        StartupConfigInput, StartupOptions, build_startup_plan, default_cache_path,
+        load_startup_config, prepare_runtime, run_until, shutdown_listener_tasks,
+        startup_source_from_arg, wait_for_runtime_stop,
     };
     use crate::config::external::{
         ExternalConfig, ExternalConfigSource, ExternalDocument, ListenerInput,
         ListenerProtocolInput, NodeInput, TargetRefInput,
     };
+    use crate::config::internal::{ProtocolKind, TargetRef};
+    use crate::listener::{
+        ListenerAdmissionPlan, ListenerHandler, ListenerPlan, ListenerTaskHandle,
+    };
+    use crate::operations::OperationsPlan;
     use crate::provider::cache::CacheStore;
     use crate::subscription::ConfigActivationSource;
 
@@ -458,6 +587,69 @@ rules:
         let _ = fs::remove_file(path);
     }
 
+    #[tokio::test]
+    async fn startup_prepare_runtime_accepts_repository_example_config() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config/example.yaml");
+
+        let startup = prepare_runtime(&StartupOptions {
+            source: ExternalConfigSource::LocalFile {
+                path: path.display().to_string(),
+            },
+            cache_path: None,
+        })
+        .await
+        .expect("repository example config should prepare a runtime");
+
+        assert_eq!(startup.activation.source, ConfigActivationSource::LocalFile);
+        assert_eq!(startup.runtime.listeners().listeners().len(), 1);
+        assert_eq!(
+            startup.runtime.active_config().listeners()[0].name,
+            "local-socks"
+        );
+        assert_eq!(
+            startup.runtime.active_config().nodes()[0].name,
+            "default-upstream"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_prepare_runtime_rejects_configs_without_listeners() {
+        let path = temp_path("runtime-no-listeners");
+        let config = ExternalConfig {
+            nodes: vec![NodeInput {
+                name: "node-a".to_string(),
+                address: "1.1.1.1:443".to_string(),
+                provider: None,
+                subscription: None,
+            }],
+            ..ExternalConfig::default()
+        };
+        fs::write(
+            &path,
+            serde_yaml::to_string(&config).expect("config should serialize"),
+        )
+        .expect("config file should be written");
+
+        let error = prepare_runtime(&StartupOptions {
+            source: ExternalConfigSource::LocalFile {
+                path: path.display().to_string(),
+            },
+            cache_path: None,
+        })
+        .await
+        .expect_err("startup should reject configs that do not serve listeners");
+
+        assert_eq!(
+            error,
+            crate::error::Error::validation(format!(
+                "startup source 'local:{}' did not yield any listeners to serve",
+                path.display()
+            ))
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
     #[test]
     fn startup_source_parser_keeps_boundary_simple() {
         assert_eq!(
@@ -475,6 +667,16 @@ rules:
     }
 
     #[test]
+    fn startup_plan_defaults_to_repository_example_config() {
+        assert_eq!(
+            build_startup_plan().subscription.source,
+            ExternalConfigSource::LocalFile {
+                path: "config/example.yaml".to_string()
+            }
+        );
+    }
+
+    #[test]
     fn remote_sources_get_a_stable_default_cache_path() {
         let cache_path = default_cache_path(&ExternalConfigSource::ClashSubscription {
             url: "http://example.com/a?b=c".to_string(),
@@ -485,5 +687,121 @@ rules:
             cache_path,
             PathBuf::from(".minibox/cache/http-example-com-a-b-c.yaml")
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_wait_returns_shutdown_reason_when_signal_arrives() {
+        let mut handles = vec![spawn_idle_listener_task("local-socks", 1080)];
+        let reason =
+            wait_for_runtime_stop(&OperationsPlan::default(), &mut handles, async { Ok(()) })
+                .await
+                .expect("shutdown signal should stop runtime");
+
+        assert_eq!(reason, "shutdown signal received");
+        shutdown_listener_tasks(&mut handles)
+            .await
+            .expect("listener shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn runtime_wait_propagates_listener_failure() {
+        let mut handles = vec![spawn_failed_listener_task("local-socks", 1080)];
+        let error = wait_for_runtime_stop(
+            &OperationsPlan::default(),
+            &mut handles,
+            std::future::pending::<Result<(), crate::error::Error>>(),
+        )
+        .await
+        .expect_err("listener failure should stop runtime");
+
+        assert_eq!(
+            error,
+            crate::error::Error::io(
+                "listener 'local-socks' (Socks5) on '127.0.0.1:1080' failed while accepting downstream connections: boom"
+            )
+        );
+        shutdown_listener_tasks(&mut handles)
+            .await
+            .expect("shutdown of remaining listeners should succeed");
+    }
+
+    #[tokio::test]
+    async fn runtime_run_until_honors_shutdown_signal() {
+        let path = temp_path("runtime-run-until");
+        let config = ExternalConfig {
+            listeners: vec![ListenerInput {
+                name: "local-socks".to_string(),
+                bind: "127.0.0.1:0".to_string(),
+                protocol: ListenerProtocolInput::Socks5,
+                target: TargetRefInput::node("node-a"),
+            }],
+            nodes: vec![NodeInput {
+                name: "node-a".to_string(),
+                address: "1.1.1.1:443".to_string(),
+                provider: None,
+                subscription: None,
+            }],
+            ..ExternalConfig::default()
+        };
+        fs::write(
+            &path,
+            serde_yaml::to_string(&config).expect("config should serialize"),
+        )
+        .expect("config file should be written");
+
+        match run_until(
+            StartupOptions {
+                source: ExternalConfigSource::LocalFile {
+                    path: path.display().to_string(),
+                },
+                cache_path: None,
+            },
+            async { Ok(()) },
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(crate::error::Error::Io(message))
+                if message.contains("Operation not permitted") =>
+            {
+                let _ = fs::remove_file(path);
+                return;
+            }
+            Err(error) => panic!("runtime should exit cleanly when shutdown is requested: {error}"),
+        }
+
+        let _ = fs::remove_file(path);
+    }
+
+    fn spawn_idle_listener_task(name: &str, port: u16) -> ListenerTaskHandle {
+        let plan = test_listener_plan(name, port);
+        let local_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let task =
+            tokio::spawn(async { std::future::pending::<Result<(), crate::error::Error>>().await });
+        ListenerTaskHandle::new(plan, local_addr, task)
+    }
+
+    fn spawn_failed_listener_task(name: &str, port: u16) -> ListenerTaskHandle {
+        let plan = test_listener_plan(name, port);
+        let local_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let error = crate::error::Error::io(format!(
+            "listener '{}' ({:?}) on '{}' failed while accepting downstream connections: boom",
+            name,
+            ProtocolKind::Socks5,
+            local_addr
+        ));
+        let task = tokio::spawn(async move { Err(error) });
+        ListenerTaskHandle::new(plan, local_addr, task)
+    }
+
+    fn test_listener_plan(name: &str, port: u16) -> ListenerPlan {
+        ListenerPlan {
+            name: name.to_string(),
+            bind: format!("127.0.0.1:{port}"),
+            protocol: ProtocolKind::Socks5,
+            target: TargetRef::Node("node-a".to_string()),
+            handler: ListenerHandler::Socks5,
+            admission: ListenerAdmissionPlan { shared_limit: 64 },
+        }
     }
 }

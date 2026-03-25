@@ -7,8 +7,9 @@ use tokio::task::{JoinError, JoinHandle};
 use crate::error::Error;
 use crate::listener::{
     AdmissionControl, BoundListener, ListenerPlan, ListenerRegistry, PreparedListener,
-    bind_prepared_listener,
+    bind_prepared_listener, bind_registry,
 };
+use crate::logging::{default_log_event, emit_log_event};
 use crate::session::{SessionContext, SessionPlan, drive_session};
 
 #[derive(Debug)]
@@ -19,6 +20,18 @@ pub struct ListenerTaskHandle {
 }
 
 impl ListenerTaskHandle {
+    pub(crate) fn new(
+        plan: ListenerPlan,
+        local_addr: SocketAddr,
+        task: JoinHandle<Result<(), Error>>,
+    ) -> Self {
+        Self {
+            plan,
+            local_addr,
+            task,
+        }
+    }
+
     pub fn plan(&self) -> &ListenerPlan {
         &self.plan
     }
@@ -29,6 +42,10 @@ impl ListenerTaskHandle {
 
     pub fn abort(&self) {
         self.task.abort();
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.task.is_finished()
     }
 
     pub async fn join(self) -> Result<Result<(), Error>, JoinError> {
@@ -46,11 +63,7 @@ pub async fn spawn_prepared_listener(
     let plan = bound.plan().clone();
     let task = tokio::spawn(run_accept_loop(bound, admission, session_plan));
 
-    Ok(ListenerTaskHandle {
-        plan,
-        local_addr,
-        task,
-    })
+    Ok(ListenerTaskHandle::new(plan, local_addr, task))
 }
 
 pub async fn spawn_registry_accept_loops(
@@ -58,12 +71,15 @@ pub async fn spawn_registry_accept_loops(
     admission: &AdmissionControl,
     session_plan: SessionPlan,
 ) -> Result<Vec<ListenerTaskHandle>, Error> {
-    let mut handles = Vec::with_capacity(registry.listeners().len());
+    let bound_listeners = bind_registry(registry).await?;
+    let mut handles = Vec::with_capacity(bound_listeners.len());
 
-    for listener in registry.listeners() {
-        handles.push(
-            spawn_prepared_listener(listener.clone(), admission.clone(), session_plan).await?,
-        );
+    for listener in bound_listeners {
+        let local_addr = listener.local_addr();
+        let plan = listener.plan().clone();
+        let task = tokio::spawn(run_accept_loop(listener, admission.clone(), session_plan));
+
+        handles.push(ListenerTaskHandle::new(plan, local_addr, task));
     }
 
     Ok(handles)
@@ -75,7 +91,18 @@ pub async fn run_accept_loop(
     session_plan: SessionPlan,
 ) -> Result<(), Error> {
     loop {
-        let (stream, peer_addr) = listener.accept().await?;
+        let (stream, peer_addr) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(error) if is_transient_accept_error(&error) => continue,
+            Err(error) => {
+                return Err(Error::io(format!(
+                    "listener '{}' ({:?}) on '{}' failed while accepting downstream connections: {error}",
+                    listener.plan().name,
+                    listener.plan().protocol,
+                    listener.local_addr()
+                )));
+            }
+        };
         spawn_session_task(
             listener.plan().clone(),
             listener.local_addr(),
@@ -99,6 +126,7 @@ fn spawn_session_task(
         let guard = match admission.try_acquire() {
             Ok(guard) => guard,
             Err(_) => {
+                emit_session_closed(&plan, "rejected_capacity");
                 let _ = stream.shutdown().await;
                 return;
             }
@@ -106,9 +134,34 @@ fn spawn_session_task(
 
         let _guard = guard;
         let context = SessionContext::from_listener_plan(&plan, peer_addr, local_addr);
-        let _ = drive_session(&mut stream, context, session_plan).await;
+        let result = drive_session(&mut stream, context, session_plan).await;
+        let result_label = match &result {
+            Ok(_) => "ok",
+            Err(error) => error.result_label(),
+        };
+        emit_session_closed(&plan, result_label);
         let _ = stream.shutdown().await;
     });
+}
+
+fn emit_session_closed(plan: &ListenerPlan, result: &str) {
+    if let Some(event) = default_log_event("session.closed") {
+        emit_log_event(
+            event,
+            &[
+                ("listener", plan.name.clone()),
+                ("protocol", format!("{:?}", plan.protocol)),
+                ("result", result.to_string()),
+            ],
+        );
+    }
+}
+
+fn is_transient_accept_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::Interrupted | std::io::ErrorKind::ConnectionAborted
+    )
 }
 
 #[cfg(test)]
@@ -119,9 +172,10 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::time::timeout;
 
-    use super::spawn_prepared_listener;
-    use crate::config::internal::{Limits, ProtocolKind, TargetRef};
-    use crate::listener::{AdmissionControl, ListenerPlan, prepare_listener};
+    use super::{spawn_prepared_listener, spawn_registry_accept_loops};
+    use crate::config::internal::{Limits, ListenerConfig, ProtocolKind, TargetRef};
+    use crate::error::Error;
+    use crate::listener::{AdmissionControl, ListenerPlan, ListenerRegistry, prepare_listener};
     use crate::session::SessionPlan;
 
     #[tokio::test]
@@ -449,6 +503,56 @@ mod tests {
         assert!(join.is_cancelled());
     }
 
+    #[tokio::test]
+    async fn registry_spawn_releases_earlier_bindings_when_a_later_listener_fails() {
+        let Some(first_port) = available_local_port().await else {
+            return;
+        };
+        let occupied_listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("occupied listener should bind: {error}"),
+        };
+        let occupied_port = occupied_listener
+            .local_addr()
+            .expect("occupied listener should expose addr")
+            .port();
+
+        let registry = ListenerRegistry::from_configs(
+            &[
+                ListenerConfig {
+                    name: "local-socks".to_string(),
+                    bind: format!("127.0.0.1:{first_port}"),
+                    protocol: ProtocolKind::Socks5,
+                    target: TargetRef::Node("node-a".to_string()),
+                },
+                ListenerConfig {
+                    name: "local-connect".to_string(),
+                    bind: format!("127.0.0.1:{occupied_port}"),
+                    protocol: ProtocolKind::HttpConnect,
+                    target: TargetRef::Node("node-a".to_string()),
+                },
+            ],
+            &AdmissionControl::new(4),
+        );
+
+        let error = spawn_registry_accept_loops(
+            &registry,
+            &AdmissionControl::new(4),
+            SessionPlan::from_limits(&Limits::default()),
+        )
+        .await
+        .expect_err("occupied later listener should fail startup");
+
+        assert!(matches!(error, Error::Io(_)));
+
+        drop(occupied_listener);
+        let rebound = TcpListener::bind(format!("127.0.0.1:{first_port}"))
+            .await
+            .expect("earlier successful bind should be released on failure");
+        drop(rebound);
+    }
+
     async fn spawn_echo_server() -> std::io::Result<(
         std::net::SocketAddr,
         tokio::task::JoinHandle<std::io::Result<()>>,
@@ -484,5 +588,19 @@ mod tests {
             .port();
         drop(listener);
         port
+    }
+
+    async fn available_local_port() -> Option<u16> {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return None,
+            Err(error) => panic!("temporary listener should bind: {error}"),
+        };
+        let port = listener
+            .local_addr()
+            .expect("temporary listener should have addr")
+            .port();
+        drop(listener);
+        Some(port)
     }
 }

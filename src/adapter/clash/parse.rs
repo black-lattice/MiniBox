@@ -293,7 +293,9 @@ fn apply_group_field(
         "proxies" => {
             group.proxies = parse_inline_list(value).unwrap_or_else(|| vec![clean_scalar(value)])
         }
-        "use" => group.r#use = parse_inline_list(value).unwrap_or_else(|| vec![clean_scalar(value)]),
+        "use" => {
+            group.r#use = parse_inline_list(value).unwrap_or_else(|| vec![clean_scalar(value)])
+        }
         _ => {
             let _ = (lines, index);
         }
@@ -348,7 +350,10 @@ fn split_key_value<'a>(line: &'a Line) -> Result<(&'a str, Option<&'a str>), Err
     split_inline_key_value_optional(line.content.as_str(), line.number)
 }
 
-fn split_inline_key_value<'a>(content: &'a str, line_number: usize) -> Result<(&'a str, &'a str), Error> {
+fn split_inline_key_value<'a>(
+    content: &'a str,
+    line_number: usize,
+) -> Result<(&'a str, &'a str), Error> {
     let (key, value) = split_inline_key_value_optional(content, line_number)?;
     let Some(value) = value else {
         return Err(Error::validation(format!(
@@ -445,11 +450,7 @@ fn skip_nested_block(lines: &[Line], index: &mut usize, parent_indent: usize) {
     }
 }
 
-fn ensure_block_value(
-    key: &str,
-    value: Option<&str>,
-    line_number: usize,
-) -> Result<(), Error> {
+fn ensure_block_value(key: &str, value: Option<&str>, line_number: usize) -> Result<(), Error> {
     if value.is_some() {
         return Err(Error::validation(format!(
             "'{}' must be defined as a block at line {}",
